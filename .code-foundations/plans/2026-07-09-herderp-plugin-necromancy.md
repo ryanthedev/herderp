@@ -1,7 +1,9 @@
 # Plan: herderp — herdr Claude plugin + session necromancy
 
 **Created:** 2026-07-09
-**Status:** ready
+**Status:** in-progress
+**Started:** 2026-07-09 22:24
+**Current Phase:** 1
 **Complexity:** medium
 
 ---

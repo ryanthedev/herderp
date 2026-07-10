@@ -1,9 +1,10 @@
 # Plan: herderp — herdr Claude plugin + session necromancy
 
 **Created:** 2026-07-09
-**Status:** in-progress
+**Status:** complete
 **Started:** 2026-07-09 22:24
-**Current Phase:** 4
+**Completed:** 2026-07-10 00:11
+**Duration:** ~1h47m
 **Complexity:** medium
 
 ---
@@ -270,3 +271,10 @@ Summary: `src/necromancy/core.ts` deep module — `deriveSlug`, `findSpaces`, `l
 - [x] Committed
 Commit: 79e597a
 Summary: Deep `HerdrClient` (`src/herdr/client.ts`) wraps `herdr <sub>` shell-out with typed methods (agentList/agentGet/agentRead/agentWait, workspaceList/workspaceCreate/workspaceFocus, paneRun/paneClose, sessionList) returning seam types `Agent{sessionId,cwd,status,workspaceId,tabId,paneId}`, `Workspace{id,label,cwd,tabCount,paneCount}`, `Session{name,default,running}`; all failures normalized to typed `HerdrError`. 9 curated tools registered and wired into the real server. LIVE-VERIFIED CORRECTIONS Phase 3 must honor: (a) only `session list` takes `--json` — other subcommands emit JSON by default and ERROR on `--json`; (b) `identity_cwd` is NOT on `workspace list` output in herdr 0.7.1, so `workspaceList()` derives `Workspace.cwd` from the workspace's first pane via an extra `pane list --workspace` call, falling back to `""` for paneless workspaces. 50 tests green.
+
+### Phase 4: Necromancy skill + live e2e verification (Gate: Standard)
+- [x] BUILD: skill authored + live e2e; discovery caught a real paneRun bug
+- [x] REVIEW: fail (live e2e ran on plain `bun test`, littered graveyard) → gated behind `HERDERP_E2E_LIVE=1` → passed (1 attempt)
+- [x] Committed
+Commit: f58ae74
+Summary: `skills/necromancy/SKILL.md` (flexible target → find-a-space → list → preview → pick → revive; degraded-env prose), `validate_skill` clean. Live e2e (`test/e2e/revive.test.ts`, opt-in via `HERDERP_E2E_LIVE=1`) exercises real start→kill→revive; confirmed same session id reattaches with prior context. THE E2E CAUGHT A REAL BUG the unit tests missed: real `herdr pane run` prints nothing on success but the shared runner required JSON, so every real `revive()` threw `invalid_response` (masked by a fabricated-JSON stub) — fixed with a `runHerdrVoid` path, `paneRun` void seam unchanged. Final suite: 92 pass, 1 skip (opt-in live), 0 fail; routine `bun test` is side-effect-free.

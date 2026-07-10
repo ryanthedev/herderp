@@ -56,6 +56,30 @@ describe("herderp MCP server (stdio)", () => {
     }
   });
 
+  it("DW_2_3_curated_herdr_tools_appear_in_the_real_servers_tools_list", async () => {
+    const { client, transport } = await connectClient();
+    try {
+      const { tools } = await client.listTools();
+      const names = tools.map((t) => t.name);
+
+      for (const expected of [
+        "herdr_agent_list",
+        "herdr_agent_get",
+        "herdr_agent_read",
+        "herdr_agent_wait",
+        "herdr_workspace_create",
+        "herdr_workspace_focus",
+        "herdr_pane_run",
+        "herdr_pane_close",
+        "herdr_session_list",
+      ]) {
+        expect(names).toContain(expected);
+      }
+    } finally {
+      await transport.close();
+    }
+  });
+
   it("DW_1_1_stdout_carries_only_json_rpc_no_stray_logging", async () => {
     // Capture the child's raw stdout independently of the SDK's own framing
     // and assert every non-empty line parses as a JSON-RPC message. A stray

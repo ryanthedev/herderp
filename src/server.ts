@@ -8,6 +8,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { registerTool } from "./registry.js";
+import { createHerdrClient } from "./herdr/client.js";
+import { registerCuratedTools } from "./tools/curated.js";
 
 export const SERVER_NAME = "herderp";
 export const SERVER_VERSION = "0.1.0";
@@ -30,6 +32,7 @@ function registerStubTool(server: McpServer): void {
 async function main(): Promise<void> {
   const server = createServer();
   registerStubTool(server);
+  registerCuratedTools(server, createHerdrClient());
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

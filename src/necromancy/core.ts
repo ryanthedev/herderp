@@ -22,6 +22,23 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { HerdrClient } from "../herdr/client.js";
 import { parseSessionPreview } from "./preview.js";
+import {
+  DEFAULT_MAX_OUTLINE_ENTRIES,
+  DEFAULT_MAX_READ_BYTES,
+  DEFAULT_MAX_READ_SPAN,
+  DEFAULT_MAX_SEARCH_MATCHES,
+  outlineTurns,
+  parseTurns,
+  readTurns,
+  searchTurns,
+  type OutlineOptions,
+  type OutlineResult,
+  type ReadResult,
+  type SearchOptions,
+  type SearchResult,
+} from "./reader.js";
+
+export type { Turn, TurnRole, OutlineEntry, SearchMatch, FullEntry } from "./reader.js";
 
 /**
  * Claude Code's project-directory slug: each `/` and `.` in the cwd becomes
@@ -60,6 +77,14 @@ export interface NecromancyOptions {
   pollIntervalMs?: number;
   /** Injectable so detection-timeout tests run instantly. */
   sleep?: (ms: number) => Promise<void>;
+  /** Max entries per sessionOutline page. Default 200. */
+  maxOutlineEntries?: number;
+  /** Max matches per sessionSearch call. Default 50. */
+  maxSearchMatches?: number;
+  /** Max total bytes per sessionRead response. Default 64 KiB. */
+  maxReadBytes?: number;
+  /** Max entry span per sessionRead call. Default 200. */
+  maxReadSpan?: number;
 }
 
 export interface SpaceInfo {
@@ -111,6 +136,10 @@ export function createNecromancy(options: NecromancyOptions) {
     detectTimeoutMs = 15_000,
     pollIntervalMs = 500,
     sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+    maxOutlineEntries = DEFAULT_MAX_OUTLINE_ENTRIES,
+    maxSearchMatches = DEFAULT_MAX_SEARCH_MATCHES,
+    maxReadBytes = DEFAULT_MAX_READ_BYTES,
+    maxReadSpan = DEFAULT_MAX_READ_SPAN,
   } = options;
 
   /**
@@ -290,5 +319,73 @@ export function createNecromancy(options: NecromancyOptions) {
     }
   }
 
-  return { findSpaces, listSessions, revive };
+  /**
+   * Shared barricade for sessionOutline/sessionSearch/sessionRead: validates
+   * `sessionId` as a UUID BEFORE any path is constructed (same shape as
+   * revive's gate 1), then stat-gates existence and size BEFORE any content
+   * read (gate 2), then parses. Oversized is treated the same as absent -
+   * the caller-visible contract is "can't retrieve this session," not a
+   * distinct error code (see phase-1 discovery doc).
+   */
+  async function loadTurns(sessionId: string, cwd: string) {
+    if (!UUID_RE.test(sessionId)) {
+      throw new NecromancyError(
+        "invalid_session_id",
+        `session id is not a UUID: ${JSON.stringify(sessionId.slice(0, 80))}`,
+      );
+    }
+
+    const sessionFile = join(projectsRoot, deriveSlug(cwd), `${sessionId}.jsonl`);
+    let size: number;
+    try {
+      ({ size } = await stat(sessionFile));
+    } catch (error) {
+      if (isEnoent(error)) {
+        throw new NecromancyError("session_not_found", `no session file for ${sessionId} in space ${cwd}`);
+      }
+      throw error;
+    }
+    if (size === 0 || size > maxSessionBytes) {
+      throw new NecromancyError("session_not_found", `no session file for ${sessionId} in space ${cwd}`);
+    }
+
+    const text = await readSessionText(sessionFile);
+    if (text === null) {
+      throw new NecromancyError("session_not_found", `no session file for ${sessionId} in space ${cwd}`);
+    }
+    return parseTurns(text);
+  }
+
+  async function sessionOutline(args: {
+    sessionId: string;
+    cwd: string;
+  } & OutlineOptions): Promise<OutlineResult> {
+    const { sessionId, cwd, ...outlineOptions } = args;
+    const turns = await loadTurns(sessionId, cwd);
+    return outlineTurns(turns, { limit: maxOutlineEntries, ...outlineOptions });
+  }
+
+  async function sessionSearch(args: {
+    sessionId: string;
+    cwd: string;
+    query: string;
+  } & SearchOptions): Promise<SearchResult> {
+    const { sessionId, cwd, query, ...searchOptions } = args;
+    const turns = await loadTurns(sessionId, cwd);
+    return searchTurns(turns, query, { limit: maxSearchMatches, ...searchOptions });
+  }
+
+  async function sessionRead(args: {
+    sessionId: string;
+    cwd: string;
+    from: number;
+    to?: number;
+    maxBytes?: number;
+  }): Promise<ReadResult> {
+    const { sessionId, cwd, from, to, maxBytes } = args;
+    const turns = await loadTurns(sessionId, cwd);
+    return readTurns(turns, { from, to, maxBytes: maxBytes ?? maxReadBytes, maxSpan: maxReadSpan });
+  }
+
+  return { findSpaces, listSessions, revive, sessionOutline, sessionSearch, sessionRead };
 }

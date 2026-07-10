@@ -30,20 +30,20 @@ describe("plugin manifest (.claude-plugin/plugin.json)", () => {
 });
 
 describe("MCP registration (.mcp.json)", () => {
-  it("DW_1_2_registers_the_herderp_stdio_server_at_the_plugin_root", async () => {
+  it("DW_1_2_registers_the_derp_stdio_server_at_the_plugin_root", async () => {
     const mcpConfig = await Bun.file(path.join(ROOT, ".mcp.json")).json();
     expect(mcpConfig.mcpServers).toBeDefined();
 
-    const herderp = mcpConfig.mcpServers.herderp;
-    expect(herderp).toBeDefined();
-    expect(typeof herderp.command).toBe("string");
-    expect(Array.isArray(herderp.args)).toBe(true);
+    const derp = mcpConfig.mcpServers.derp;
+    expect(derp).toBeDefined();
+    expect(typeof derp.command).toBe("string");
+    expect(Array.isArray(derp.args)).toBe(true);
   });
 
   it("uses ${CLAUDE_PLUGIN_ROOT} for the bundled server path, not a hardcoded path", async () => {
     const mcpConfig = await Bun.file(path.join(ROOT, ".mcp.json")).json();
-    const herderp = mcpConfig.mcpServers.herderp;
-    const argsString = herderp.args.join(" ");
+    const derp = mcpConfig.mcpServers.derp;
+    const argsString = derp.args.join(" ");
     expect(argsString).toContain("${CLAUDE_PLUGIN_ROOT}");
     expect(argsString).not.toContain(ROOT);
   });

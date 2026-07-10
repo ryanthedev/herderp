@@ -13,8 +13,8 @@ import { createNecromancy } from "./necromancy/core.js";
 import { registerCuratedTools } from "./tools/curated.js";
 import { registerNecromancyTools } from "./tools/necromancy.js";
 
-export const SERVER_NAME = "herderp";
-export const SERVER_VERSION = "0.2.0";
+export const SERVER_NAME = "derp";
+export const SERVER_VERSION = "0.3.0";
 
 /** Builds a bare McpServer with no tools registered - reusable by the real entry point and by tests. */
 export function createServer(): McpServer {

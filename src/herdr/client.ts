@@ -40,9 +40,9 @@ export interface HerdrClient {
   agentWait(target: string, opts: AgentWaitOptions): Promise<Agent>;
   workspaceList(): Promise<Workspace[]>;
   /** Returns the created workspace plus its root pane's id (from the create
-   * envelope's `result.root_pane.pane_id`) - the pane necromancy's revive
-   * runs `claude --resume` in. Phase 3-sanctioned seam addendum; see the
-   * phase-3 discovery doc (GAP-1). */
+   * envelope's `result.root_pane.pane_id`) - the pane callers run commands
+   * in. Phase 3-sanctioned seam addendum; see the phase-3 discovery doc
+   * (GAP-1). */
   workspaceCreate(opts: WorkspaceCreateOptions): Promise<Workspace & { rootPaneId: string }>;
   workspaceFocus(id: string): Promise<void>;
   paneRun(paneId: string, command: string): Promise<void>;

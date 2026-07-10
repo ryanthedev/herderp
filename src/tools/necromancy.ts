@@ -1,9 +1,8 @@
 // Necromancy MCP tools - thin registrations over the necromancy core
-// (DW-3.6). All logic (slug rule, graveyard scan, validation, revival
-// orchestration) lives in src/necromancy/core.ts where it is unit-testable;
-// each handler here is one method call. registerTool (Phase 1) supplies the
-// MCP response shape and turns thrown NecromancyError/HerdrError into
-// isError tool results.
+// (DW-3.6). All logic (slug rule, graveyard scan, validation) lives in
+// src/necromancy/core.ts where it is unit-testable; each handler here is one
+// method call. registerTool (Phase 1) supplies the MCP response shape and
+// turns thrown NecromancyError/HerdrError into isError tool results.
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -28,7 +27,10 @@ const TURN_ROLES = ["user", "thinking", "text", "tool_use", "tool_result"] as co
 // them here via zod `.max()`. Reusing reader.ts's own defaults as the
 // ceiling keeps the tool-facing limit identical to the server's own intent.
 
-/** Registers the three necromancy tools on `server`, backed by `necromancy`. */
+/**
+ * Registers the necromancy tools on `server`, backed by `necromancy`:
+ * find_spaces, list_sessions, outline, search, read.
+ */
 export function registerNecromancyTools(server: McpServer, necromancy: Necromancy): void {
   registerTool(server, {
     name: "necromancy_find_spaces",
@@ -44,14 +46,6 @@ export function registerNecromancyTools(server: McpServer, necromancy: Necromanc
       "Lists Claude Code sessions for one space (its cwd), newest first, marking which are live in herdr, with a one-line preview and message count for each.",
     inputSchema: { space: z.string() },
     handler: async ({ space }) => ({ sessions: await necromancy.listSessions(space) }),
-  });
-
-  registerTool(server, {
-    name: "necromancy_revive",
-    description:
-      "Revives a dead Claude Code session: validates the session id (strict UUID), creates a herdr workspace at the cwd, runs `claude --resume` in its root pane, and waits (bounded) for herdr to detect the agent. Returns {workspaceId, paneId, sessionId, detected}.",
-    inputSchema: { sessionId: z.string(), cwd: z.string() },
-    handler: async ({ sessionId, cwd }) => ({ ...(await necromancy.revive({ sessionId, cwd })) }),
   });
 
   registerTool(server, {

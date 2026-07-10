@@ -235,7 +235,7 @@ describe("HerdrClient - DW-2.1 parse-success per method", () => {
   // herdr 0.7.1 prints nothing to stdout on a successful `pane run` (unlike
   // every other subcommand, which always echoes a JSON envelope) - the
   // original implementation ran this through the JSON-requiring `runHerdr`
-  // and threw `invalid_response` on every real revive, even though the stub
+  // and threw `invalid_response` on every real pane run, even though the stub
   // above (a fabricated JSON success body) made the unit suite pass.
   it("DW_2_1_paneRun_tolerates_empty_stdout_on_success_live_herdr_behavior", async () => {
     const { runner, calls } = stubRunner([ok("")]);

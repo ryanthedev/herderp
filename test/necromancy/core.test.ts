@@ -10,10 +10,9 @@ import { join } from "node:path";
 import {
   createNecromancy,
   deriveSlug,
-  NecromancyError,
   type NecromancyOptions,
 } from "../../src/necromancy/core.js";
-import type { HerdrClient } from "../../src/herdr/client.js";
+import { createHerdrClient, type HerdrClient, type HerdrRunner } from "../../src/herdr/client.js";
 import { HerdrError, type Agent, type Workspace } from "../../src/herdr/types.js";
 
 const U1 = "11111111-1111-1111-1111-111111111111";
@@ -197,6 +196,24 @@ describe("necromancy core (fixture FS + stub client)", () => {
       expect(spaces[0]!.workspaceId).toBe("w1");
       expect(spaces[0]!.label).toBe("first");
     });
+
+    it("DW_4_4_findSpaces_surfaces_a_typed_HerdrError_when_herdr_is_unreachable", async () => {
+      // Salvaged from the removed live e2e suite: with a real HerdrClient
+      // over a down runner, findSpaces must surface a typed HerdrError (not a
+      // raw crash) once the disk scan finds a space and reaches herdr.
+      await makeSpace("/tmp/proj-a"); // a dir must exist so workspaceList is reached
+      const herdrDownRunner: HerdrRunner = async () => {
+        throw new Error("connect ECONNREFUSED /Users/r/.config/herdr/herdr.sock");
+      };
+      const core = createNecromancy({ projectsRoot: root, client: createHerdrClient(herdrDownRunner) });
+
+      const error = await core.findSpaces().catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(HerdrError);
+      expect((error as HerdrError).code).toBe("spawn_failed");
+      expect((error as HerdrError).message).toContain("herdr");
+      expect((error as HerdrError).message).not.toContain("undefined is not a function");
+    });
   });
 
   describe("listSessions - DW-3.3", () => {
@@ -296,171 +313,6 @@ describe("necromancy core (fixture FS + stub client)", () => {
 
       expect(err).toBeInstanceOf(HerdrError);
       expect((err as HerdrError).code).toBe("spawn_failed");
-    });
-  });
-
-  describe("revive - DW-3.4 / DW-3.5", () => {
-    const cwd = "/tmp/proj-a";
-    const created = { ...stubWorkspace("w9", cwd), rootPaneId: "w9:p1" };
-
-    async function seedSession(id: string): Promise<void> {
-      const dir = await makeSpace(cwd);
-      await writeSession(dir, id, sessionContent("dead session", cwd));
-    }
-
-    it("DW_3_4_revive_creates_workspace_runs_claude_resume_and_returns_the_detected_agent", async () => {
-      await seedSession(U1);
-      const paneRuns: Array<[string, string]> = [];
-      const sleeps: number[] = [];
-      let polls = 0;
-
-      const core = necromancy({
-        pollIntervalMs: 100,
-        detectTimeoutMs: 1_000,
-        sleep: async (ms) => {
-          sleeps.push(ms);
-        },
-        client: stubClient({
-          workspaceCreate: async (opts) => {
-            expect(opts).toEqual({ cwd });
-            return created;
-          },
-          paneRun: async (paneId, command) => {
-            paneRuns.push([paneId, command]);
-          },
-          // Detection lags one poll: first agentList misses, second finds it
-          // in a DIFFERENT pane - the detected placement must win.
-          agentList: async () => (++polls < 2 ? [] : [stubAgent(U1, "w9", "w9:p2")]),
-        }),
-      });
-      const result = await core.revive({ sessionId: U1, cwd });
-
-      expect(paneRuns).toEqual([["w9:p1", `claude --resume ${U1}`]]);
-      expect(result).toEqual({ workspaceId: "w9", paneId: "w9:p2", sessionId: U1, detected: true });
-      expect(sleeps).toEqual([100]);
-    });
-
-    it("DW_3_4_detection_never_arrives_bounded_wait_returns_detected_false", async () => {
-      await seedSession(U1);
-      let polls = 0;
-      let sleepCount = 0;
-
-      const core = necromancy({
-        pollIntervalMs: 100,
-        detectTimeoutMs: 300,
-        sleep: async () => {
-          sleepCount += 1;
-        },
-        client: stubClient({
-          workspaceCreate: async () => created,
-          paneRun: async () => undefined,
-          agentList: async () => {
-            polls += 1;
-            return [];
-          },
-        }),
-      });
-      const result = await core.revive({ sessionId: U1, cwd });
-
-      expect(result).toEqual({ workspaceId: "w9", paneId: "w9:p1", sessionId: U1, detected: false });
-      expect(polls).toBe(4); // elapsed 0/100/200/300 - deterministic bound
-      expect(sleepCount).toBe(3);
-    });
-
-    it("DW_3_4_default_sleep_is_a_real_timer_between_polls", async () => {
-      // No injected sleep: the default setTimeout-backed sleep runs for real
-      // (1ms cadence keeps the test instant).
-      await seedSession(U1);
-      let polls = 0;
-
-      const core = necromancy({
-        pollIntervalMs: 1,
-        detectTimeoutMs: 50,
-        client: stubClient({
-          workspaceCreate: async () => created,
-          paneRun: async () => undefined,
-          agentList: async () => (++polls < 2 ? [] : [stubAgent(U1, "w9", "w9:p1")]),
-        }),
-      });
-      const result = await core.revive({ sessionId: U1, cwd });
-
-      expect(result.detected).toBe(true);
-      expect(polls).toBe(2);
-    });
-
-    it("DW_3_4_workspaceCreate_failure_surfaces_typed_and_paneRun_is_never_reached", async () => {
-      await seedSession(U1);
-      const paneRuns: string[] = [];
-
-      const core = necromancy({
-        client: stubClient({
-          workspaceCreate: async () => {
-            throw new HerdrError("command_failed", "workspace limit reached");
-          },
-          paneRun: async (paneId) => {
-            paneRuns.push(paneId);
-          },
-        }),
-      });
-      const err = await core.revive({ sessionId: U1, cwd }).catch((e: unknown) => e);
-
-      expect(err).toBeInstanceOf(HerdrError);
-      expect((err as HerdrError).code).toBe("command_failed");
-      expect(paneRuns).toEqual([]);
-    });
-
-    it("DW_3_4_paneRun_failure_surfaces_typed_without_a_partial_state_crash", async () => {
-      await seedSession(U1);
-
-      const core = necromancy({
-        client: stubClient({
-          workspaceCreate: async () => created,
-          paneRun: async () => {
-            throw new HerdrError("command_failed", "pane w9:p1 not found");
-          },
-        }),
-      });
-      const err = await core.revive({ sessionId: U1, cwd }).catch((e: unknown) => e);
-
-      expect(err).toBeInstanceOf(HerdrError);
-      expect((err as HerdrError).code).toBe("command_failed");
-    });
-
-    it("DW_3_5_non_uuid_id_rejected_before_any_command_is_constructed", async () => {
-      await seedSession(U1);
-      const maliciousIds = [
-        "x; rm -rf ~",
-        "$(whoami)",
-        "`touch /tmp/pwned`",
-        `${U1}; echo pwned`,
-        `${U1}\n`,
-        "11111111-1111-1111-1111-11111111111Z",
-        "--help",
-        "",
-      ];
-
-      for (const sessionId of maliciousIds) {
-        const { client, calls } = trackingClient();
-        const core = necromancy({ client });
-
-        const err = await core.revive({ sessionId, cwd }).catch((e: unknown) => e);
-
-        expect(err).toBeInstanceOf(NecromancyError);
-        expect((err as NecromancyError).code).toBe("invalid_session_id");
-        expect(calls).toEqual([]); // zero herdr calls: nothing was constructed or run
-      }
-    });
-
-    it("DW_3_5_uuid_with_no_ondisk_file_rejected_typed_before_any_herdr_call", async () => {
-      await makeSpace(cwd); // space exists, session file does not
-      const { client, calls } = trackingClient();
-      const core = necromancy({ client });
-
-      const err = await core.revive({ sessionId: U2, cwd }).catch((e: unknown) => e);
-
-      expect(err).toBeInstanceOf(NecromancyError);
-      expect((err as NecromancyError).code).toBe("session_not_found");
-      expect(calls).toEqual([]);
     });
   });
 });

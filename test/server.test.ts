@@ -28,7 +28,7 @@ describe("herderp MCP server (stdio)", () => {
     try {
       // connect() already performs `initialize` under the hood; getServerVersion
       // is only populated once that handshake succeeded without error.
-      expect(client.getServerVersion()?.name).toBe("herderp");
+      expect(client.getServerVersion()?.name).toBe("derp");
 
       const { tools } = await client.listTools();
       expect(Array.isArray(tools)).toBe(true);
@@ -86,7 +86,7 @@ describe("herderp MCP server (stdio)", () => {
       const { tools } = await client.listTools();
       const names = tools.map((t) => t.name);
 
-      for (const expected of ["necromancy_find_spaces", "necromancy_list_sessions", "necromancy_revive"]) {
+      for (const expected of ["necromancy_find_spaces", "necromancy_list_sessions"]) {
         expect(names).toContain(expected);
       }
     } finally {

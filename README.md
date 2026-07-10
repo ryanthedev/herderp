@@ -1,6 +1,6 @@
 # herderp
 
-A Claude Code plugin: a stdio **MCP server** wrapping the [`herdr`](https://github.com/ryanthedev/herderp) CLI with curated one-shot tools, plus **session necromancy** — revive a previous Claude Code agent session from a herdr "space."
+A Claude Code plugin: a stdio **MCP server** wrapping the [`herdr`](https://github.com/ryanthedev/herderp) CLI with curated one-shot tools, plus **session necromancy** — find and read a previous Claude Code agent session from a herdr "space."
 
 ## What it does
 
@@ -8,12 +8,13 @@ A Claude Code plugin: a stdio **MCP server** wrapping the [`herdr`](https://gith
 - **Necromancy** — point at a space (a herdr workspace id, label, project cwd, session name, or nothing) and:
   - `necromancy_find_spaces` — scan `~/.claude/projects/*` and live workspaces, present revivable candidates.
   - `necromancy_list_sessions` — enumerate the dead sessions that lived in a space (disk is authoritative), ranked by recency, marked live vs dead, with a per-session preview.
-  - `necromancy_revive` — resurrect a chosen session via `claude --resume <uuid>` in a fresh herdr pane, then wait for herdr to re-detect it.
-- **`necromancy` skill** — drives the find-a-space → list → preview → pick → revive flow conversationally.
+  - `necromancy_outline` / `necromancy_search` / `necromancy_read` — read a past session's turns in place: outline its shape, search it by keyword or regex, and pull specific turns back verbatim, all capped on count and bytes.
+- **`necromancy` skill** — drives the find-a-space → list → outline → search → read flow conversationally.
+- **`/herderp:ghost` command** — a one-shot séance: summon the previous session, or point it at an agent/space name and/or a session id to read a specific one. Get a mini summary of what it did and where it stopped, plus resume questions. Reading only — it never revives.
 
-## How revive works
+## How reading works
 
-Dead Claude sessions persist on disk at `~/.claude/projects/<cwd-slug>/<uuid>.jsonl` independent of herdr pane life (the slug maps each `/` **and** `.` in the cwd to `-`). Necromancy enumerates them from disk, then resurrects the chosen one with `herdr pane run <pane> 'claude --resume <uuid>'` in the target cwd. herdr tags an agent only after its first turn, so revive polls with a bounded wait and reports an honest `detected` flag.
+Claude sessions persist on disk at `~/.claude/projects/<cwd-slug>/<uuid>.jsonl` independent of herdr pane life (the slug maps each `/` **and** `.` in the cwd to `-`). Necromancy enumerates them from disk and reads their turns in place — no pane, no relaunch. The reader parses the raw jsonl, skips empty/oversized/malformed files by `stat` alone, and validates every session id against a strict UUID regex before touching the filesystem.
 
 ## Requirements
 
@@ -37,12 +38,6 @@ bun test            # unit + integration (side-effect-free)
 bun run start       # boot the MCP server on stdio
 ```
 
-The live end-to-end revive proof is opt-in (it starts and kills a throwaway session):
-
-```bash
-HERDERP_E2E_LIVE=1 bun test test/e2e/revive.test.ts
-```
-
 ## Scope (v1)
 
-Claude agents only; resume-only (restores the conversation, not pane geometry). Non-Claude agent kinds and layout rebuild are later seams.
+Claude agents only; reading only (find, list, and read past sessions in place). Non-Claude agent kinds are a later seam.

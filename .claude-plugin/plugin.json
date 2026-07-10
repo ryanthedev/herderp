@@ -1,8 +1,8 @@
 {
   "name": "herderp",
   "displayName": "herderp",
-  "version": "0.2.0",
-  "description": "MCP tools for the herdr CLI, plus session necromancy: revive a previous Claude Code agent session from a herdr space.",
+  "version": "0.3.0",
+  "description": "MCP tools for the herdr CLI, plus session necromancy: find and read a previous Claude Code agent session from a herdr space.",
   "author": {
     "name": "r"
   },
@@ -11,7 +11,6 @@
     "herdr",
     "mcp",
     "necromancy",
-    "session-revive",
     "claude-code",
     "workspace"
   ],

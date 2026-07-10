@@ -86,6 +86,35 @@ function isErrorEnvelope(value: unknown): value is { error: { code: string; mess
   );
 }
 
+/** Spawns one herdr invocation, normalizing a runner that never starts to a
+ * typed `HerdrError` - shared by both `runHerdr` and `runHerdrVoid`. */
+async function spawnHerdr(runner: HerdrRunner, argv: string[]): Promise<HerdrRunResult> {
+  try {
+    return await runner(argv);
+  } catch (cause) {
+    throw new HerdrError(
+      "spawn_failed",
+      `failed to launch herdr ${argv.join(" ")}: ${errorMessage(cause)}`,
+      { cause },
+    );
+  }
+}
+
+/** Throws a typed HerdrError for a nonzero exit (JSON `{"error":...}` body,
+ * verbatim; otherwise stderr/stdout text); no-op on exit 0. Shared so both
+ * `runHerdr` and `runHerdrVoid` normalize command failure identically. */
+function throwOnNonZeroExit(outcome: HerdrRunResult, argv: string[]): void {
+  const { stdout, stderr, exitCode } = outcome;
+  if (exitCode === 0) return;
+  const trimmedStdout = stdout.trim();
+  const parsed = trimmedStdout ? tryParseJson(trimmedStdout) : undefined;
+  if (isErrorEnvelope(parsed)) {
+    throw new HerdrError(parsed.error.code, parsed.error.message);
+  }
+  const detail = stderr.trim() || trimmedStdout || `herdr exited with code ${exitCode}`;
+  throw new HerdrError("command_failed", `herdr ${argv.join(" ")}: ${detail}`);
+}
+
 /**
  * Runs one herdr invocation and returns its parsed JSON body, or throws a
  * HerdrError. Centralizes every failure mode so it's implemented (and
@@ -96,29 +125,11 @@ function isErrorEnvelope(value: unknown): value is { error: { code: string; mess
  *   - exit 0 but stdout isn't parseable JSON (malformed/partial)     -> "invalid_response"
  */
 async function runHerdr(runner: HerdrRunner, argv: string[]): Promise<unknown> {
-  let outcome: HerdrRunResult;
-  try {
-    outcome = await runner(argv);
-  } catch (cause) {
-    throw new HerdrError(
-      "spawn_failed",
-      `failed to launch herdr ${argv.join(" ")}: ${errorMessage(cause)}`,
-      { cause },
-    );
-  }
+  const outcome = await spawnHerdr(runner, argv);
+  throwOnNonZeroExit(outcome, argv);
 
-  const { stdout, stderr, exitCode } = outcome;
-  const trimmedStdout = stdout.trim();
+  const trimmedStdout = outcome.stdout.trim();
   const parsed = trimmedStdout ? tryParseJson(trimmedStdout) : undefined;
-
-  if (exitCode !== 0) {
-    if (isErrorEnvelope(parsed)) {
-      throw new HerdrError(parsed.error.code, parsed.error.message);
-    }
-    const detail = stderr.trim() || trimmedStdout || `herdr exited with code ${exitCode}`;
-    throw new HerdrError("command_failed", `herdr ${argv.join(" ")}: ${detail}`);
-  }
-
   if (parsed === undefined) {
     throw new HerdrError(
       "invalid_response",
@@ -126,6 +137,19 @@ async function runHerdr(runner: HerdrRunner, argv: string[]): Promise<unknown> {
     );
   }
   return parsed;
+}
+
+/**
+ * Like `runHerdr` but for commands that print nothing on success - verified
+ * live: `herdr pane run <pane> <command>` types the command into the pane
+ * (Enter included) and exits 0 with empty stdout, unlike every other
+ * subcommand (`pane close`, `workspace focus`, ...) which echoes a
+ * `{id,result}`/`{id,error}` JSON envelope either way. Failure handling is
+ * identical to `runHerdr`; success never requires - or gets - parsed JSON.
+ */
+async function runHerdrVoid(runner: HerdrRunner, argv: string[]): Promise<void> {
+  const outcome = await spawnHerdr(runner, argv);
+  throwOnNonZeroExit(outcome, argv);
 }
 
 /** Reads `.result.<key>` out of the `{id,result:{...}}` envelope used by
@@ -299,7 +323,7 @@ export function createHerdrClient(runner: HerdrRunner = bunHerdrRunner): HerdrCl
     },
 
     async paneRun(paneId, command) {
-      await runHerdr(runner, ["pane", "run", paneId, command]);
+      await runHerdrVoid(runner, ["pane", "run", paneId, command]);
     },
 
     async paneClose(paneId) {

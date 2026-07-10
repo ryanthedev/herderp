@@ -3,7 +3,7 @@
 **Created:** 2026-07-09
 **Status:** in-progress
 **Started:** 2026-07-09 22:24
-**Current Phase:** 3
+**Current Phase:** 4
 **Complexity:** medium
 
 ---
@@ -256,6 +256,13 @@ Consumed by Phase 3's `findSpaces` (workspaceList + agentList) and resume orches
 - [x] Committed
 Commit: af93b19
 Summary: Bun/TS Claude-plugin skeleton with a stdio MCP server that boots and answers initialize/tools/list; exposes `createServer()` and a deep `registerTool(server, {name, description, inputSchema, handler})` harness (stderr-only logging, error normalization); `.claude-plugin/plugin.json` + `.mcp.json` registration verified against docs; 10 tests green. Phases 2–3 register tools through `registerTool`.
+
+### Phase 3: Necromancy core + tools (Gate: Full, Security-sensitive)
+- [x] BUILD: Discovery (UPDATE_PLAN — pane-id seam gap; user approved surfacing rootPaneId) → implementation
+- [x] REVIEW: 3-sample fable → PASS/FAIL/PASS = majority PASS; unanimous trivial coverage gap closed with one additive test
+- [x] Committed
+Commit: ba4522a
+Summary: `src/necromancy/core.ts` deep module — `deriveSlug`, `findSpaces`, `listSessions`, `revive` — with injectable projectsRoot + HerdrClient + sleep for testability; UUID-first injection guard proven against 8 hostile ids (zero herdr calls, argv-array spawn); bounded detection poll → honest `detected` flag; three MCP tools (`necromancy_find_spaces`/`list_sessions`/`revive`) wired into the real server. Phase 2 seam extended: `workspaceCreate` now returns `rootPaneId`. 88 tests green, 100% of unit-testable lines. FOLLOW-UPS (non-blocking, not in DW): (a) reviving an already-live session would launch a duplicate `claude --resume` — no dedup-against-live guard yet; (b) tools expose `inputSchema` only — no formal MCP `outputSchema` (Phase 1 harness has no seam for it).
 
 ### Phase 2: herdr client + curated tools (Gate: Standard)
 - [x] BUILD: Discovery + design + implementation complete

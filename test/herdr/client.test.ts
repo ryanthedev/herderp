@@ -231,6 +231,31 @@ describe("HerdrClient - DW-2.1 parse-success per method", () => {
     expect(calls).toEqual([["pane", "run", "w3:p1", "echo hi"]]);
   });
 
+  // Regression test for a bug live e2e verification found in Phase 4: real
+  // herdr 0.7.1 prints nothing to stdout on a successful `pane run` (unlike
+  // every other subcommand, which always echoes a JSON envelope) - the
+  // original implementation ran this through the JSON-requiring `runHerdr`
+  // and threw `invalid_response` on every real revive, even though the stub
+  // above (a fabricated JSON success body) made the unit suite pass.
+  it("DW_2_1_paneRun_tolerates_empty_stdout_on_success_live_herdr_behavior", async () => {
+    const { runner, calls } = stubRunner([ok("")]);
+    const client = createHerdrClient(runner);
+
+    await expect(client.paneRun("w3:p1", "claude --resume 11111111-1111-1111-1111-111111111111")).resolves.toBeUndefined();
+    expect(calls).toEqual([["pane", "run", "w3:p1", "claude --resume 11111111-1111-1111-1111-111111111111"]]);
+  });
+
+  it("DW_2_2_paneRun_nonzero_exit_with_no_json_still_raises_a_typed_command_failed_error", async () => {
+    const { runner } = stubRunner([fail(1, { stderr: "pane not found" })]);
+    const client = createHerdrClient(runner);
+
+    const err = await client.paneRun("w9:p1", "echo hi").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HerdrError);
+    expect((err as HerdrError).code).toBe("command_failed");
+    expect((err as HerdrError).message).toContain("pane not found");
+  });
+
   it("DW_2_1_paneClose_spawns_pane_close_with_paneId", async () => {
     const { runner, calls } = stubRunner([ok(JSON.stringify({ id: "cli:pane:close", result: {} }))]);
     const client = createHerdrClient(runner);

@@ -1,0 +1,82 @@
+[
+  {
+    "query": "I was deep in a refactoring session with Claude Code for ~/projects/payments-api last Tuesday and I think it's still saved on disk. Can you dig it up and bring it back?",
+    "should_trigger": true
+  },
+  {
+    "query": "My terminal crashed and I lost the claude agent pane I had open — it was working on the /home/jess/monorepo/auth-service module. Is there a way to resurrect it?",
+    "should_trigger": true
+  },
+  {
+    "query": "I need to reattach to that claude conversation about the kubernetes migration, it's not running anymore and I really don't want to start from scratch and re-explain everything",
+    "should_trigger": true
+  },
+  {
+    "query": "Show me all the old Claude Code sessions you can find for the ml-pipeline project at /workspace/ml — I want to see what's there and pick up where the last one left off",
+    "should_trigger": true
+  },
+  {
+    "query": "I closed the herdr pane by accident and lost my claude agent session that was halfway through writing unit tests. Can you find it and revive it?",
+    "should_trigger": true
+  },
+  {
+    "query": "What saved claude sessions do I have for my current cwd? I remember one that was debugging the race condition in the websocket handler",
+    "should_trigger": true
+  },
+  {
+    "query": "Bring back the claude code session I had going for my terraform infra project — I think the workspace is under /home/dev/infra, not sure of the exact session id tho",
+    "should_trigger": true
+  },
+  {
+    "query": "Is there any session history on disk for ~/code/api-gateway? I was using claude to trace a memory leak and want to restore that context before diving back in",
+    "should_trigger": true
+  },
+  {
+    "query": "I accidentally killed my claude code agent earlier today, it was helping me with the postgres upgrade migration script. Can you find and restore that conversation?",
+    "should_trigger": true
+  },
+  {
+    "query": "What past agent sessions exist for my react frontend workspace? List them so I can pick which one to resurrect — I think one was building out the dashboard components",
+    "should_trigger": true
+  },
+  {
+    "query": "Can you spin up a brand new Claude Code agent session for my /home/dev/backend project? I want to start completely fresh on the API redesign with a clean slate.",
+    "should_trigger": false
+  },
+  {
+    "query": "Open a new pane in herdr for my payments-service workspace so I can run some build commands there",
+    "should_trigger": false
+  },
+  {
+    "query": "I want to pick up where I left off on the auth module refactor — can you help me continue the work from what we've been discussing in this conversation?",
+    "should_trigger": false
+  },
+  {
+    "query": "How do I use the `claude --resume` flag from the command line? What session ID format does it expect and where are the session files actually stored on disk?",
+    "should_trigger": false
+  },
+  {
+    "query": "Can you snapshot or export this current Claude Code session so I can resume it on my work laptop tomorrow morning?",
+    "should_trigger": false
+  },
+  {
+    "query": "I need to restore my git stash from two days ago that had the half-finished auth refactor — can you help me find and apply it without clobbering my current changes?",
+    "should_trigger": false
+  },
+  {
+    "query": "Switch me over to the herdr tab or pane where I already have my backend project open — I think it's pane 3 or 4 in the main workspace",
+    "should_trigger": false
+  },
+  {
+    "query": "My cursor IDE crashed mid-session — help me recover my unsaved changes from the editor's auto-backup or swap files in /tmp",
+    "should_trigger": false
+  },
+  {
+    "query": "Launch a fresh claude code agent in the /workspace/schema-redesign directory to start helping me design a new database schema from scratch",
+    "should_trigger": false
+  },
+  {
+    "query": "My aider session for the backend repo died when I lost wifi — can you help me get back into that coding session and figure out where it left off?",
+    "should_trigger": false
+  }
+]

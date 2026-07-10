@@ -3,7 +3,7 @@
 **Created:** 2026-07-10
 **Status:** in-progress
 **Started:** 2026-07-10 14:30
-**Current Phase:** 1
+**Current Phase:** 2
 **Complexity:** simple
 
 ---
@@ -131,4 +131,10 @@ plus exported types `Turn`, `TurnRole`, `OutlineEntry`, `SearchMatch`, `FullEntr
 ---
 
 ## Execution Log
-_To be filled during /code-foundations:build_
+
+### Phase 1: Session-reader core (Gate: Full, Security-sensitive)
+- [x] BUILD: Discovery + design + implementation complete
+- [x] REVIEW: 3-sample fable → FAIL/FAIL/FAIL (byte-cap UTF-8 overshoot + coverage) → fixed → PASS/PASS/PASS
+- [x] Committed
+Commit: ea47486
+Summary: `src/necromancy/reader.ts` (pure turn model + `outlineTurns`/`searchTurns`/`readTurns`, role-tagged index-addressed entries) and `src/necromancy/core.ts` `sessionOutline`/`sessionSearch`/`sessionRead` behind a UUID-first `loadTurns` barricade + stat/size gate; every response honors count and byte caps (hard even at multibyte boundaries). 44 reader tests, 100% executable-line coverage; revive/findSpaces/listSessions untouched. NON-BLOCKING for Phase 2: caller-supplied `maxBytes`/`limit`/`offset` are NOT clamped down to the configured caps — the tool layer must ceiling model-supplied values so a tool call can't request an oversized slice.

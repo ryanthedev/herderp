@@ -19,6 +19,8 @@ const STUB_AGENT: Agent = {
 };
 
 const STUB_WORKSPACE: Workspace = { id: "w9", label: "foo", cwd: "/tmp/x", tabCount: 1, paneCount: 1 };
+/** workspaceCreate's richer return shape (Phase 3 seam addendum). */
+const STUB_CREATED_WORKSPACE = { ...STUB_WORKSPACE, rootPaneId: "w9:p1" };
 const STUB_SESSION: Session = { name: "default", default: true, running: true };
 
 function stubClient(overrides: Partial<HerdrClient> = {}): HerdrClient {
@@ -28,7 +30,7 @@ function stubClient(overrides: Partial<HerdrClient> = {}): HerdrClient {
     agentRead: async () => "pane output",
     agentWait: async () => STUB_AGENT,
     workspaceList: async () => [STUB_WORKSPACE],
-    workspaceCreate: async () => STUB_WORKSPACE,
+    workspaceCreate: async () => STUB_CREATED_WORKSPACE,
     workspaceFocus: async () => undefined,
     paneRun: async () => undefined,
     paneClose: async () => undefined,
@@ -171,7 +173,7 @@ describe("registerCuratedTools - DW-2.3 curated tools present with input schemas
       stubClient({
         workspaceCreate: async (opts) => {
           received = opts;
-          return STUB_WORKSPACE;
+          return STUB_CREATED_WORKSPACE;
         },
       }),
     );
@@ -181,6 +183,6 @@ describe("registerCuratedTools - DW-2.3 curated tools present with input schemas
 
     expect(received).toEqual({ cwd: "/tmp/y", label: "bar", focus: true });
     expect(result.isError).toBeFalsy();
-    expect(JSON.parse(result.content[0]!.text)).toEqual(STUB_WORKSPACE);
+    expect(JSON.parse(result.content[0]!.text)).toEqual(STUB_CREATED_WORKSPACE);
   });
 });

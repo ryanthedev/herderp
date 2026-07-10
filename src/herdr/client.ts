@@ -39,7 +39,11 @@ export interface HerdrClient {
   agentRead(target: string, opts?: AgentReadOptions): Promise<string>;
   agentWait(target: string, opts: AgentWaitOptions): Promise<Agent>;
   workspaceList(): Promise<Workspace[]>;
-  workspaceCreate(opts: WorkspaceCreateOptions): Promise<Workspace>;
+  /** Returns the created workspace plus its root pane's id (from the create
+   * envelope's `result.root_pane.pane_id`) - the pane necromancy's revive
+   * runs `claude --resume` in. Phase 3-sanctioned seam addendum; see the
+   * phase-3 discovery doc (GAP-1). */
+  workspaceCreate(opts: WorkspaceCreateOptions): Promise<Workspace & { rootPaneId: string }>;
   workspaceFocus(id: string): Promise<void>;
   paneRun(paneId: string, command: string): Promise<void>;
   paneClose(paneId: string): Promise<void>;
@@ -277,10 +281,17 @@ export function createHerdrClient(runner: HerdrRunner = bunHerdrRunner): HerdrCl
       ];
       const parsed = await runHerdr(runner, argv);
       const fields = mapWorkspaceFields(unwrapResult(parsed, "workspace", argv), argv);
+      const rootPane = unwrapResult(parsed, "root_pane", argv);
+      if (!isRecord(rootPane) || typeof rootPane.pane_id !== "string") {
+        throw new HerdrError(
+          "invalid_response",
+          `herdr ${argv.join(" ")}: expected result.root_pane.pane_id to be a string, got ${JSON.stringify(rootPane).slice(0, 200)}`,
+        );
+      }
       // workspaceCreate always knows the cwd it asked for - no extra pane
       // query needed (unlike workspaceList, which has to infer it after the
       // fact from an existing workspace's first pane).
-      return { ...fields, cwd: opts.cwd };
+      return { ...fields, cwd: opts.cwd, rootPaneId: rootPane.pane_id };
     },
 
     async workspaceFocus(id) {

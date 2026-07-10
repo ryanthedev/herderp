@@ -3,7 +3,7 @@
 **Created:** 2026-07-09
 **Status:** in-progress
 **Started:** 2026-07-09 22:24
-**Current Phase:** 2
+**Current Phase:** 3
 **Complexity:** medium
 
 ---
@@ -85,7 +85,7 @@ Feasibility is confirmed by a live end-to-end test (see research doc `.code-foun
 
 **Produces:** `HerdrClient` interface —
 - `agentList(): Promise<Agent[]>`, `agentGet(target): Promise<Agent>`, `agentRead(target, opts): Promise<string>`, `agentWait(target, {status, timeoutMs}): Promise<Agent>`
-- `workspaceList(): Promise<Workspace[]>`, `workspaceCreate({cwd, label?, focus?}): Promise<Workspace>`, `workspaceFocus(id): Promise<void>`
+- `workspaceList(): Promise<Workspace[]>`, `workspaceCreate({cwd, label?, focus?}): Promise<Workspace & {rootPaneId: string}>` (rootPaneId from the create envelope's `result.root_pane.pane_id` — addendum sanctioned during Phase 3 for the revive seam), `workspaceFocus(id): Promise<void>`
 - `paneRun(paneId, command): Promise<void>`, `paneClose(paneId): Promise<void>`
 - `sessionList(): Promise<Session[]>`
 
@@ -111,7 +111,7 @@ Consumed by Phase 3's `findSpaces` (workspaceList + agentList) and resume orches
 **Gate:** Full
 **Security-sensitive:** yes
 **Depends on:** Phase 2
-**File scope:** `src/necromancy/**, src/tools/necromancy.ts, test/necromancy/**`
+**File scope:** `src/necromancy/**, src/tools/necromancy.ts, test/necromancy/**, src/herdr/** (rootPaneId seam addendum), src/server.ts (necromancy-tool wiring)`
 
 **Goal:** Implement the deterministic necromancy core (slug, graveyard scan, ranking, preview, resume orchestration) as a deep module and expose it as MCP tools.
 
@@ -256,3 +256,10 @@ Consumed by Phase 3's `findSpaces` (workspaceList + agentList) and resume orches
 - [x] Committed
 Commit: af93b19
 Summary: Bun/TS Claude-plugin skeleton with a stdio MCP server that boots and answers initialize/tools/list; exposes `createServer()` and a deep `registerTool(server, {name, description, inputSchema, handler})` harness (stderr-only logging, error normalization); `.claude-plugin/plugin.json` + `.mcp.json` registration verified against docs; 10 tests green. Phases 2–3 register tools through `registerTool`.
+
+### Phase 2: herdr client + curated tools (Gate: Standard)
+- [x] BUILD: Discovery + design + implementation complete
+- [x] REVIEW: fail (coverage gap) → fixed → passed (1 attempt)
+- [x] Committed
+Commit: 79e597a
+Summary: Deep `HerdrClient` (`src/herdr/client.ts`) wraps `herdr <sub>` shell-out with typed methods (agentList/agentGet/agentRead/agentWait, workspaceList/workspaceCreate/workspaceFocus, paneRun/paneClose, sessionList) returning seam types `Agent{sessionId,cwd,status,workspaceId,tabId,paneId}`, `Workspace{id,label,cwd,tabCount,paneCount}`, `Session{name,default,running}`; all failures normalized to typed `HerdrError`. 9 curated tools registered and wired into the real server. LIVE-VERIFIED CORRECTIONS Phase 3 must honor: (a) only `session list` takes `--json` — other subcommands emit JSON by default and ERROR on `--json`; (b) `identity_cwd` is NOT on `workspace list` output in herdr 0.7.1, so `workspaceList()` derives `Workspace.cwd` from the workspace's first pane via an extra `pane list --workspace` call, falling back to `""` for paneless workspaces. 50 tests green.

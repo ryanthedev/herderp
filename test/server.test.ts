@@ -80,6 +80,20 @@ describe("herderp MCP server (stdio)", () => {
     }
   });
 
+  it("DW_3_6_necromancy_tools_appear_in_the_real_servers_tools_list", async () => {
+    const { client, transport } = await connectClient();
+    try {
+      const { tools } = await client.listTools();
+      const names = tools.map((t) => t.name);
+
+      for (const expected of ["necromancy_find_spaces", "necromancy_list_sessions", "necromancy_revive"]) {
+        expect(names).toContain(expected);
+      }
+    } finally {
+      await transport.close();
+    }
+  });
+
   it("DW_1_1_stdout_carries_only_json_rpc_no_stray_logging", async () => {
     // Capture the child's raw stdout independently of the SDK's own framing
     // and assert every non-empty line parses as a JSON-RPC message. A stray

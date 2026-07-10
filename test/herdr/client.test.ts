@@ -134,11 +134,17 @@ describe("HerdrClient - DW-2.1 parse-success per method", () => {
   });
 
   it("DW_2_1_workspaceCreate_spawns_workspace_create_with_flags_and_echoes_the_requested_cwd", async () => {
+    // Envelope shape matches the live-captured `workspace create` response
+    // (phase-3 discovery): result carries both `workspace` and `root_pane`.
     const { runner, calls } = stubRunner([
       ok(
         JSON.stringify({
           id: "cli:workspace:create",
-          result: { workspace: { workspace_id: "w9", label: "foo", tab_count: 1, pane_count: 1 } },
+          result: {
+            root_pane: { pane_id: "w9:p1", tab_id: "w9:t1", workspace_id: "w9", cwd: "/tmp/x" },
+            workspace: { workspace_id: "w9", label: "foo", tab_count: 1, pane_count: 1 },
+            type: "workspace_created",
+          },
         }),
       ),
     ]);
@@ -147,7 +153,66 @@ describe("HerdrClient - DW-2.1 parse-success per method", () => {
     const workspace = await client.workspaceCreate({ cwd: "/tmp/x", label: "foo", focus: true });
 
     expect(calls).toEqual([["workspace", "create", "--cwd", "/tmp/x", "--label", "foo", "--focus"]]);
-    expect(workspace).toEqual({ id: "w9", label: "foo", cwd: "/tmp/x", tabCount: 1, paneCount: 1 });
+    expect(workspace).toEqual({ id: "w9", label: "foo", cwd: "/tmp/x", tabCount: 1, paneCount: 1, rootPaneId: "w9:p1" });
+  });
+
+  it("DW_3_4_workspaceCreate_surfaces_rootPaneId_from_the_create_envelopes_root_pane", async () => {
+    const { runner } = stubRunner([
+      ok(
+        JSON.stringify({
+          id: "cli:workspace:create",
+          result: {
+            root_pane: { pane_id: "wK:p1", tab_id: "wK:t1", workspace_id: "wK", cwd: "/tmp/y" },
+            workspace: { workspace_id: "wK", tab_count: 1, pane_count: 1 },
+            type: "workspace_created",
+          },
+        }),
+      ),
+    ]);
+    const client = createHerdrClient(runner);
+
+    const workspace = await client.workspaceCreate({ cwd: "/tmp/y" });
+
+    expect(workspace.rootPaneId).toBe("wK:p1");
+  });
+
+  it("DW_3_4_workspaceCreate_throws_invalid_response_when_root_pane_pane_id_is_missing", async () => {
+    const { runner } = stubRunner([
+      ok(
+        JSON.stringify({
+          id: "cli:workspace:create",
+          result: { workspace: { workspace_id: "w9", tab_count: 1, pane_count: 1 } },
+        }),
+      ),
+    ]);
+    const client = createHerdrClient(runner);
+
+    const err = await client.workspaceCreate({ cwd: "/tmp/x" }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HerdrError);
+    expect((err as HerdrError).code).toBe("invalid_response");
+    expect((err as HerdrError).message).toContain("root_pane");
+  });
+
+  it("DW_3_4_workspaceCreate_throws_invalid_response_when_root_pane_pane_id_is_not_a_string", async () => {
+    const { runner } = stubRunner([
+      ok(
+        JSON.stringify({
+          id: "cli:workspace:create",
+          result: {
+            root_pane: { pane_id: 123, tab_id: "w9:t1", workspace_id: "w9", cwd: "/tmp/x" },
+            workspace: { workspace_id: "w9", tab_count: 1, pane_count: 1 },
+          },
+        }),
+      ),
+    ]);
+    const client = createHerdrClient(runner);
+
+    const err = await client.workspaceCreate({ cwd: "/tmp/x" }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HerdrError);
+    expect((err as HerdrError).code).toBe("invalid_response");
+    expect((err as HerdrError).message).toContain("result.root_pane.pane_id to be a string");
   });
 
   it("DW_2_1_workspaceFocus_spawns_workspace_focus_and_resolves_void", async () => {

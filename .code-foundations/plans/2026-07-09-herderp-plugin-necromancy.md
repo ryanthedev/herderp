@@ -1,7 +1,10 @@
 # Plan: herderp — herdr Claude plugin + session necromancy
 
 **Created:** 2026-07-09
-**Status:** ready
+**Status:** complete
+**Started:** 2026-07-09 22:24
+**Completed:** 2026-07-10 00:11
+**Duration:** ~1h47m
 **Complexity:** medium
 
 ---
@@ -83,7 +86,7 @@ Feasibility is confirmed by a live end-to-end test (see research doc `.code-foun
 
 **Produces:** `HerdrClient` interface —
 - `agentList(): Promise<Agent[]>`, `agentGet(target): Promise<Agent>`, `agentRead(target, opts): Promise<string>`, `agentWait(target, {status, timeoutMs}): Promise<Agent>`
-- `workspaceList(): Promise<Workspace[]>`, `workspaceCreate({cwd, label?, focus?}): Promise<Workspace>`, `workspaceFocus(id): Promise<void>`
+- `workspaceList(): Promise<Workspace[]>`, `workspaceCreate({cwd, label?, focus?}): Promise<Workspace & {rootPaneId: string}>` (rootPaneId from the create envelope's `result.root_pane.pane_id` — addendum sanctioned during Phase 3 for the revive seam), `workspaceFocus(id): Promise<void>`
 - `paneRun(paneId, command): Promise<void>`, `paneClose(paneId): Promise<void>`
 - `sessionList(): Promise<Session[]>`
 
@@ -109,7 +112,7 @@ Consumed by Phase 3's `findSpaces` (workspaceList + agentList) and resume orches
 **Gate:** Full
 **Security-sensitive:** yes
 **Depends on:** Phase 2
-**File scope:** `src/necromancy/**, src/tools/necromancy.ts, test/necromancy/**`
+**File scope:** `src/necromancy/**, src/tools/necromancy.ts, test/necromancy/**, src/herdr/** (rootPaneId seam addendum), src/server.ts (necromancy-tool wiring)`
 
 **Goal:** Implement the deterministic necromancy core (slug, graveyard scan, ranking, preview, resume orchestration) as a deep module and expose it as MCP tools.
 
@@ -247,4 +250,31 @@ Consumed by Phase 3's `findSpaces` (workspaceList + agentList) and resume orches
 ---
 
 ## Execution Log
-_To be filled during /code-foundations:build_
+
+### Phase 1: Scaffold + MCP server boot (Gate: Standard)
+- [x] BUILD: Discovery + design + implementation (stub → implement → validate) complete
+- [x] REVIEW: Verification passed
+- [x] Committed
+Commit: af93b19
+Summary: Bun/TS Claude-plugin skeleton with a stdio MCP server that boots and answers initialize/tools/list; exposes `createServer()` and a deep `registerTool(server, {name, description, inputSchema, handler})` harness (stderr-only logging, error normalization); `.claude-plugin/plugin.json` + `.mcp.json` registration verified against docs; 10 tests green. Phases 2–3 register tools through `registerTool`.
+
+### Phase 3: Necromancy core + tools (Gate: Full, Security-sensitive)
+- [x] BUILD: Discovery (UPDATE_PLAN — pane-id seam gap; user approved surfacing rootPaneId) → implementation
+- [x] REVIEW: 3-sample fable → PASS/FAIL/PASS = majority PASS; unanimous trivial coverage gap closed with one additive test
+- [x] Committed
+Commit: ba4522a
+Summary: `src/necromancy/core.ts` deep module — `deriveSlug`, `findSpaces`, `listSessions`, `revive` — with injectable projectsRoot + HerdrClient + sleep for testability; UUID-first injection guard proven against 8 hostile ids (zero herdr calls, argv-array spawn); bounded detection poll → honest `detected` flag; three MCP tools (`necromancy_find_spaces`/`list_sessions`/`revive`) wired into the real server. Phase 2 seam extended: `workspaceCreate` now returns `rootPaneId`. 88 tests green, 100% of unit-testable lines. FOLLOW-UPS (non-blocking, not in DW): (a) reviving an already-live session would launch a duplicate `claude --resume` — no dedup-against-live guard yet; (b) tools expose `inputSchema` only — no formal MCP `outputSchema` (Phase 1 harness has no seam for it).
+
+### Phase 2: herdr client + curated tools (Gate: Standard)
+- [x] BUILD: Discovery + design + implementation complete
+- [x] REVIEW: fail (coverage gap) → fixed → passed (1 attempt)
+- [x] Committed
+Commit: 79e597a
+Summary: Deep `HerdrClient` (`src/herdr/client.ts`) wraps `herdr <sub>` shell-out with typed methods (agentList/agentGet/agentRead/agentWait, workspaceList/workspaceCreate/workspaceFocus, paneRun/paneClose, sessionList) returning seam types `Agent{sessionId,cwd,status,workspaceId,tabId,paneId}`, `Workspace{id,label,cwd,tabCount,paneCount}`, `Session{name,default,running}`; all failures normalized to typed `HerdrError`. 9 curated tools registered and wired into the real server. LIVE-VERIFIED CORRECTIONS Phase 3 must honor: (a) only `session list` takes `--json` — other subcommands emit JSON by default and ERROR on `--json`; (b) `identity_cwd` is NOT on `workspace list` output in herdr 0.7.1, so `workspaceList()` derives `Workspace.cwd` from the workspace's first pane via an extra `pane list --workspace` call, falling back to `""` for paneless workspaces. 50 tests green.
+
+### Phase 4: Necromancy skill + live e2e verification (Gate: Standard)
+- [x] BUILD: skill authored + live e2e; discovery caught a real paneRun bug
+- [x] REVIEW: fail (live e2e ran on plain `bun test`, littered graveyard) → gated behind `HERDERP_E2E_LIVE=1` → passed (1 attempt)
+- [x] Committed
+Commit: f58ae74
+Summary: `skills/necromancy/SKILL.md` (flexible target → find-a-space → list → preview → pick → revive; degraded-env prose), `validate_skill` clean. Live e2e (`test/e2e/revive.test.ts`, opt-in via `HERDERP_E2E_LIVE=1`) exercises real start→kill→revive; confirmed same session id reattaches with prior context. THE E2E CAUGHT A REAL BUG the unit tests missed: real `herdr pane run` prints nothing on success but the shared runner required JSON, so every real `revive()` threw `invalid_response` (masked by a fabricated-JSON stub) — fixed with a `runHerdrVoid` path, `paneRun` void seam unchanged. Final suite: 92 pass, 1 skip (opt-in live), 0 fail; routine `bun test` is side-effect-free.

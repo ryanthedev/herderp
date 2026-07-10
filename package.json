@@ -1,0 +1,19 @@
+{
+  "name": "herderp",
+  "version": "0.1.0",
+  "description": "Claude Code plugin: MCP server wrapping the herdr CLI, plus session necromancy.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  }
+}

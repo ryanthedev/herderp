@@ -1,5 +1,5 @@
 // Unit tests for the necromancy MCP tools (src/tools/necromancy.ts) -
-// DW-3.6 (find_spaces/list_sessions/revive) and DW-2.1/DW-2.2 (the Phase 2
+// DW-3.6 (find_spaces/list_sessions) and DW-2.1/DW-2.2 (the Phase 2
 // reader tools: outline/search/read). Registers on a bare McpServer with a
 // stub Necromancy core (same style as test/herdr/curated.test.ts); the
 // DW-2.2 integration test instead drives a real createNecromancy() over a
@@ -17,7 +17,6 @@ import {
   deriveSlug,
   NecromancyError,
   type Necromancy,
-  type ReviveResult,
   type SessionInfo,
   type SpaceInfo,
 } from "../../src/necromancy/core.js";
@@ -26,13 +25,11 @@ import type { HerdrClient } from "../../src/herdr/client.js";
 
 const STUB_SPACE: SpaceInfo = { cwd: "/tmp/proj", label: "alpha", workspaceId: "w1", sessionCount: 2, lastActivity: 1720000000000 };
 const STUB_SESSION: SessionInfo = { id: "11111111-1111-1111-1111-111111111111", cwd: "/tmp/proj", mtime: 1720000000000, live: false, preview: "fixing things", messageCount: 4 };
-const STUB_REVIVE: ReviveResult = { workspaceId: "w9", paneId: "w9:p1", sessionId: STUB_SESSION.id, detected: true };
 
 /** Phase 1 (necromancy core) added sessionOutline/sessionSearch/sessionRead
- * to the Necromancy factory type; this file predates and is scoped to the
- * revive/find_spaces/list_sessions tools only, so those three are stubbed
- * "unexpected call" here purely to satisfy the type - not exercised by any
- * test in this file. */
+ * to the Necromancy factory type; the find_spaces/list_sessions tests here
+ * don't exercise them, so those three are stubbed "unexpected call" purely to
+ * satisfy the type. */
 function stubNecromancy(overrides: Partial<Necromancy> = {}): Necromancy {
   const unexpected = (name: string) => async () => {
     throw new Error(`unexpected necromancy call: ${name}`);
@@ -40,7 +37,6 @@ function stubNecromancy(overrides: Partial<Necromancy> = {}): Necromancy {
   return {
     findSpaces: async () => [STUB_SPACE],
     listSessions: async () => [STUB_SESSION],
-    revive: async () => STUB_REVIVE,
     sessionOutline: unexpected("sessionOutline"),
     sessionSearch: unexpected("sessionSearch"),
     sessionRead: unexpected("sessionRead"),
@@ -59,12 +55,12 @@ function registeredTools(server: McpServer): Record<string, RegisteredTool> {
 }
 
 describe("registerNecromancyTools - DW-3.6", () => {
-  it("DW_3_6_three_necromancy_tools_present_with_input_schemas", () => {
+  it("DW_3_6_necromancy_space_tools_present_with_input_schemas", () => {
     const server = new McpServer({ name: "test", version: "0.0.0" });
     registerNecromancyTools(server, stubNecromancy());
 
     const tools = registeredTools(server);
-    for (const name of ["necromancy_find_spaces", "necromancy_list_sessions", "necromancy_revive"]) {
+    for (const name of ["necromancy_find_spaces", "necromancy_list_sessions"]) {
       expect(tools[name]).toBeDefined();
       expect(tools[name]!.description.length).toBeGreaterThan(0);
       expect(tools[name]!.inputSchema).toBeDefined();
@@ -100,44 +96,6 @@ describe("registerNecromancyTools - DW-3.6", () => {
     expect(JSON.parse(result.content[0]!.text)).toEqual({ sessions: [STUB_SESSION] });
   });
 
-  it("DW_3_6_necromancy_revive_passes_sessionId_and_cwd_and_returns_the_seam_object", async () => {
-    let received: unknown;
-    const server = new McpServer({ name: "test", version: "0.0.0" });
-    registerNecromancyTools(
-      server,
-      stubNecromancy({
-        revive: async (req) => {
-          received = req;
-          return STUB_REVIVE;
-        },
-      }),
-    );
-
-    const result = await registeredTools(server).necromancy_revive!.handler(
-      { sessionId: STUB_SESSION.id, cwd: "/tmp/proj" },
-      {},
-    );
-
-    expect(received).toEqual({ sessionId: STUB_SESSION.id, cwd: "/tmp/proj" });
-    expect(JSON.parse(result.content[0]!.text)).toEqual({ ...STUB_REVIVE });
-  });
-
-  it("DW_3_6_a_thrown_NecromancyError_surfaces_as_isError_not_a_crash", async () => {
-    const server = new McpServer({ name: "test", version: "0.0.0" });
-    registerNecromancyTools(
-      server,
-      stubNecromancy({
-        revive: async () => {
-          throw new NecromancyError("invalid_session_id", 'session id is not a UUID: "nope"');
-        },
-      }),
-    );
-
-    const result = await registeredTools(server).necromancy_revive!.handler({ sessionId: "nope", cwd: "/tmp/proj" }, {});
-
-    expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toContain("not a UUID");
-  });
 });
 
 // ---------------------------------------------------------------------------

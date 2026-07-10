@@ -1,21 +1,17 @@
-// Necromancy core: the deep module behind the necromancy_* tools. Three
-// methods hide everything about session revival:
+// Necromancy core: the deep module behind the necromancy_* tools. It hides
+// everything about locating and reading Claude Code sessions on disk:
 //   - the Claude Code graveyard layout (~/.claude/projects/<slug>/<uuid>.jsonl)
 //     and its slug rule
 //   - jsonl preview parsing and the stat-gated skip policy for empty/
 //     oversized/malformed files (oversized files are never even read)
 //   - joining on-disk spaces with live herdr workspaces/agents
-//   - UUID validation, `claude --resume` command construction, and the
-//     bounded detection poll
 // Design-it-twice comparison (factory vs free fns vs class) lives in
 // .code-foundations/build/2026-07-09-herderp-plugin-necromancy-phase-3-discovery.md
 //
-// SECURITY BARRICADE: `revive`'s sessionId is untrusted external input that
-// would otherwise flow into a shell-adjacent command (`herdr pane run ...
-// "claude --resume <id>"`). It is validated against a strict UUID regex and
-// then against the on-disk graveyard BEFORE any command string is
-// constructed or any herdr call is made - a non-UUID id can never reach
-// paneRun. Tests assert zero client calls for malicious ids (DW-3.5).
+// SECURITY BARRICADE: a session's sessionId is untrusted external input that
+// flows into an on-disk path. It is validated against a strict UUID regex
+// (UUID_RE) BEFORE any path is constructed - see loadTurns's gate - so a
+// non-UUID id can never reach the filesystem.
 
 import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -54,7 +50,7 @@ export function deriveSlug(cwd: string): string {
 
 export type NecromancyErrorCode = "invalid_session_id" | "session_not_found";
 
-/** Typed rejection for revive's validation gate - never a raw string throw. */
+/** Typed rejection for the session-id validation gate - never a raw string throw. */
 export class NecromancyError extends Error {
   readonly code: NecromancyErrorCode;
 
@@ -71,12 +67,6 @@ export interface NecromancyOptions {
   projectsRoot?: string;
   /** Session files larger than this are skipped by stat alone - never read. Default 32 MiB. */
   maxSessionBytes?: number;
-  /** How long revive waits for herdr to detect the resumed agent. Default 15s. */
-  detectTimeoutMs?: number;
-  /** Detection poll cadence. Default 500ms. */
-  pollIntervalMs?: number;
-  /** Injectable so detection-timeout tests run instantly. */
-  sleep?: (ms: number) => Promise<void>;
   /** Max entries per sessionOutline page. Default 200. */
   maxOutlineEntries?: number;
   /** Max matches per sessionSearch call. Default 50. */
@@ -104,13 +94,6 @@ export interface SessionInfo {
   messageCount: number;
 }
 
-export interface ReviveResult {
-  workspaceId: string;
-  paneId: string;
-  sessionId: string;
-  detected: boolean;
-}
-
 export type Necromancy = ReturnType<typeof createNecromancy>;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -133,9 +116,6 @@ export function createNecromancy(options: NecromancyOptions) {
     client,
     projectsRoot = join(homedir(), ".claude", "projects"),
     maxSessionBytes = DEFAULT_MAX_SESSION_BYTES,
-    detectTimeoutMs = 15_000,
-    pollIntervalMs = 500,
-    sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
     maxOutlineEntries = DEFAULT_MAX_OUTLINE_ENTRIES,
     maxSearchMatches = DEFAULT_MAX_SEARCH_MATCHES,
     maxReadBytes = DEFAULT_MAX_READ_BYTES,
@@ -275,54 +255,10 @@ export function createNecromancy(options: NecromancyOptions) {
     return sessions; // scanSessionFiles already ordered newest first
   }
 
-  async function revive({ sessionId, cwd }: { sessionId: string; cwd: string }): Promise<ReviveResult> {
-    // SECURITY GATE 1: strict UUID shape, before any command string exists
-    // and before any herdr call. JSON.stringify keeps a hostile id inert in
-    // the error message.
-    if (!UUID_RE.test(sessionId)) {
-      throw new NecromancyError(
-        "invalid_session_id",
-        `session id is not a UUID: ${JSON.stringify(sessionId.slice(0, 80))}`,
-      );
-    }
-
-    // SECURITY GATE 2: the id must name a real session file - disk is
-    // authoritative. Still before any herdr call.
-    const sessionFile = join(projectsRoot, deriveSlug(cwd), `${sessionId}.jsonl`);
-    try {
-      await stat(sessionFile);
-    } catch (error) {
-      if (isEnoent(error)) {
-        throw new NecromancyError("session_not_found", `no session file for ${sessionId} in space ${cwd}`);
-      }
-      throw error;
-    }
-
-    // HerdrError from create/run propagates untouched (typed surfacing, no
-    // partial-state crash) - matches the Phase 2 error architecture.
-    const workspace = await client.workspaceCreate({ cwd });
-    await client.paneRun(workspace.rootPaneId, `claude --resume ${sessionId}`);
-
-    // Bounded detection poll. Elapsed time is accounted in requested-sleep
-    // units, so the bound is deterministic and injected-sleep tests run
-    // instantly. Timing out is an honest `detected: false`, not an error.
-    for (let elapsed = 0; ; elapsed += pollIntervalMs) {
-      const agent = (await client.agentList()).find((candidate) => candidate.sessionId === sessionId);
-      if (agent) {
-        // Herdr's detected placement is ground truth over the created ids.
-        return { workspaceId: agent.workspaceId, paneId: agent.paneId, sessionId, detected: true };
-      }
-      if (elapsed + pollIntervalMs > detectTimeoutMs) {
-        return { workspaceId: workspace.id, paneId: workspace.rootPaneId, sessionId, detected: false };
-      }
-      await sleep(pollIntervalMs);
-    }
-  }
-
   /**
    * Shared barricade for sessionOutline/sessionSearch/sessionRead: validates
-   * `sessionId` as a UUID BEFORE any path is constructed (same shape as
-   * revive's gate 1), then stat-gates existence and size BEFORE any content
+   * `sessionId` as a UUID BEFORE any path is constructed (the security gate),
+   * then stat-gates existence and size BEFORE any content
    * read (gate 2), then parses. Oversized is treated the same as absent -
    * the caller-visible contract is "can't retrieve this session," not a
    * distinct error code (see phase-1 discovery doc).
@@ -387,5 +323,5 @@ export function createNecromancy(options: NecromancyOptions) {
     return readTurns(turns, { from, to, maxBytes: maxBytes ?? maxReadBytes, maxSpan: maxReadSpan });
   }
 
-  return { findSpaces, listSessions, revive, sessionOutline, sessionSearch, sessionRead };
+  return { findSpaces, listSessions, sessionOutline, sessionSearch, sessionRead };
 }

@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.log
+.necrotest/
+.claude/settings.local.json
+.code-foundations/wave-worktrees/
+.claude/worktrees/

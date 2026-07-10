@@ -11,13 +11,24 @@ const STUB_SPACE: SpaceInfo = { cwd: "/tmp/proj", label: "alpha", workspaceId: "
 const STUB_SESSION: SessionInfo = { id: "11111111-1111-1111-1111-111111111111", cwd: "/tmp/proj", mtime: 1720000000000, live: false, preview: "fixing things", messageCount: 4 };
 const STUB_REVIVE: ReviveResult = { workspaceId: "w9", paneId: "w9:p1", sessionId: STUB_SESSION.id, detected: true };
 
+/** Phase 1 (necromancy core) added sessionOutline/sessionSearch/sessionRead
+ * to the Necromancy factory type; this file predates and is scoped to the
+ * revive/find_spaces/list_sessions tools only, so those three are stubbed
+ * "unexpected call" here purely to satisfy the type - not exercised by any
+ * test in this file. */
 function stubNecromancy(overrides: Partial<Necromancy> = {}): Necromancy {
+  const unexpected = (name: string) => async () => {
+    throw new Error(`unexpected necromancy call: ${name}`);
+  };
   return {
     findSpaces: async () => [STUB_SPACE],
     listSessions: async () => [STUB_SESSION],
     revive: async () => STUB_REVIVE,
+    sessionOutline: unexpected("sessionOutline"),
+    sessionSearch: unexpected("sessionSearch"),
+    sessionRead: unexpected("sessionRead"),
     ...overrides,
-  };
+  } as Necromancy;
 }
 
 type RegisteredTool = {

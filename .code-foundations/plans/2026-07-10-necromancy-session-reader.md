@@ -1,9 +1,10 @@
 # Plan: necromancy session reader — read a prior session instead of reviving it
 
 **Created:** 2026-07-10
-**Status:** in-progress
+**Status:** complete
 **Started:** 2026-07-10 14:30
-**Current Phase:** 2
+**Completed:** 2026-07-10 16:14
+**Duration:** ~1h44m
 **Complexity:** simple
 
 ---
@@ -138,3 +139,10 @@ plus exported types `Turn`, `TurnRole`, `OutlineEntry`, `SearchMatch`, `FullEntr
 - [x] Committed
 Commit: ea47486
 Summary: `src/necromancy/reader.ts` (pure turn model + `outlineTurns`/`searchTurns`/`readTurns`, role-tagged index-addressed entries) and `src/necromancy/core.ts` `sessionOutline`/`sessionSearch`/`sessionRead` behind a UUID-first `loadTurns` barricade + stat/size gate; every response honors count and byte caps (hard even at multibyte boundaries). 44 reader tests, 100% executable-line coverage; revive/findSpaces/listSessions untouched. NON-BLOCKING for Phase 2: caller-supplied `maxBytes`/`limit`/`offset` are NOT clamped down to the configured caps — the tool layer must ceiling model-supplied values so a tool call can't request an oversized slice.
+
+### Phase 2: MCP tools + skill guidance (Gate: Standard)
+- [x] BUILD: Discovery + design + implementation complete
+- [x] REVIEW: sonnet single-sample → PASS (1 attempt)
+- [x] Committed
+Commit: b607855
+Summary: three thin reader MCP tools (`necromancy_outline`/`search`/`read`) registered over the existing harness with zod `.max()` ceilings on caller `limit`/`maxBytes` (closes the Phase 1 carry-over); bad/absent sessions render as `isError`, reader tools never touch herdr; `SKILL.md` gains a read-a-session section + reading triggers, `validate_skill` clean. 9 tool tests incl. an end-to-end outline→search→read integration; 145 pass/1 skip/0 fail. FOLLOW-UP (non-blocking): `necromancy_outline` `offset` has no `.max()` ceiling (can't produce an oversized response, so not gating).

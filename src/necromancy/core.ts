@@ -18,6 +18,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { HerdrClient } from "../herdr/client.js";
 import { parseSessionPreview } from "./preview.js";
+import { extractAnchors, type Anchors } from "./anchors.js";
 import {
   DEFAULT_MAX_OUTLINE_ENTRIES,
   DEFAULT_MAX_READ_BYTES,
@@ -35,6 +36,7 @@ import {
 } from "./reader.js";
 
 export type { Turn, TurnRole, OutlineEntry, SearchMatch, FullEntry } from "./reader.js";
+export type { Anchors } from "./anchors.js";
 
 /**
  * Claude Code's project-directory slug: each `/` and `.` in the cwd becomes
@@ -67,6 +69,9 @@ export interface NecromancyOptions {
   projectsRoot?: string;
   /** Session files larger than this are skipped by stat alone - never read. Default 32 MiB. */
   maxSessionBytes?: number;
+  /** Max spaces per findSpaces call (newest-activity first). Default 40 - a full dump of every
+   * project dir routinely blows the tool-result token cap, so the list is always bounded. */
+  maxSpaces?: number;
   /** Max entries per sessionOutline page. Default 200. */
   maxOutlineEntries?: number;
   /** Max matches per sessionSearch call. Default 50. */
@@ -85,6 +90,22 @@ export interface SpaceInfo {
   lastActivity: number | null;
 }
 
+export interface FindSpacesOptions {
+  /** Case-insensitive substring narrowing over each space's cwd/label/workspaceId. */
+  query?: string;
+  /** Max spaces returned (newest-activity first). Defaults to the configured maxSpaces. */
+  limit?: number;
+}
+
+export interface FindSpacesResult {
+  /** Matching spaces, newest-activity first, capped to `limit`. */
+  spaces: SpaceInfo[];
+  /** Total spaces that matched before the cap - so a caller can say "40 of 976". */
+  total: number;
+  /** True when more matched than were returned: narrow with `query` rather than assuming it's all. */
+  truncated: boolean;
+}
+
 export interface SessionInfo {
   id: string;
   cwd: string;
@@ -98,6 +119,7 @@ export type Necromancy = ReturnType<typeof createNecromancy>;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_MAX_SESSION_BYTES = 32 * 1024 * 1024;
+export const DEFAULT_MAX_SPACES = 40;
 
 /** A UUID-named .jsonl session file found on disk (stat metadata only). */
 interface SessionFile {
@@ -116,6 +138,7 @@ export function createNecromancy(options: NecromancyOptions) {
     client,
     projectsRoot = join(homedir(), ".claude", "projects"),
     maxSessionBytes = DEFAULT_MAX_SESSION_BYTES,
+    maxSpaces = DEFAULT_MAX_SPACES,
     maxOutlineEntries = DEFAULT_MAX_OUTLINE_ENTRIES,
     maxSearchMatches = DEFAULT_MAX_SEARCH_MATCHES,
     maxReadBytes = DEFAULT_MAX_READ_BYTES,
@@ -190,16 +213,24 @@ export function createNecromancy(options: NecromancyOptions) {
     return null;
   }
 
-  async function findSpaces(): Promise<SpaceInfo[]> {
+  /**
+   * Spaces from the on-disk graveyard joined with live herdr workspaces,
+   * newest-activity first and capped: a full dump of every project dir (the
+   * user's machine routinely has hundreds) blows the tool-result token cap, so
+   * the list is always bounded and `query` narrows it. `total`/`truncated`
+   * report how many matched beyond the cap so a caller can stay honest.
+   */
+  async function findSpaces(options: FindSpacesOptions = {}): Promise<FindSpacesResult> {
+    const { query, limit = maxSpaces } = options;
     let entries;
     try {
       entries = await readdir(projectsRoot, { withFileTypes: true });
     } catch (error) {
-      if (isEnoent(error)) return []; // no graveyard at all: no spaces, not a crash
+      if (isEnoent(error)) return { spaces: [], total: 0, truncated: false }; // no graveyard at all: not a crash
       throw error;
     }
     const dirs = entries.filter((entry) => entry.isDirectory());
-    if (dirs.length === 0) return [];
+    if (dirs.length === 0) return { spaces: [], total: 0, truncated: false };
 
     // Join key: slug(workspace.cwd) == graveyard dir name. Workspaces with
     // cwd "" (paneless - documented Phase 2 fallback) carry no join signal;
@@ -224,7 +255,23 @@ export function createNecromancy(options: NecromancyOptions) {
         lastActivity: files[0]?.mtimeMs ?? null,
       });
     }
-    return spaces;
+
+    const needle = query?.trim().toLowerCase();
+    const matched = needle
+      ? spaces.filter(
+          (space) =>
+            space.cwd.toLowerCase().includes(needle) ||
+            (space.label?.toLowerCase().includes(needle) ?? false) ||
+            (space.workspaceId?.toLowerCase().includes(needle) ?? false),
+        )
+      : spaces;
+    // Newest-active first so the default (uncapped-query) page is the spaces a
+    // catch-up most likely wants; null lastActivity (empty spaces) sorts last.
+    matched.sort((a, b) => (b.lastActivity ?? 0) - (a.lastActivity ?? 0));
+
+    const total = matched.length;
+    const capped = matched.slice(0, Math.max(0, limit));
+    return { spaces: capped, total, truncated: capped.length < total };
   }
 
   async function listSessions(cwd: string): Promise<SessionInfo[]> {
@@ -323,5 +370,16 @@ export function createNecromancy(options: NecromancyOptions) {
     return readTurns(turns, { from, to, maxBytes: maxBytes ?? maxReadBytes, maxSpan: maxReadSpan });
   }
 
-  return { findSpaces, listSessions, sessionOutline, sessionSearch, sessionRead };
+  /**
+   * The deterministic "always grab" anchor set for a session: the ask, final
+   * state, commits/PRs, versions, files touched, errors, test results, and
+   * user decisions - regex-extracted, so a catch-up summary can be grounded on
+   * evidence rather than the model's recall. Same barricade as the readers.
+   */
+  async function sessionAnchors(args: { sessionId: string; cwd: string }): Promise<Anchors> {
+    const turns = await loadTurns(args.sessionId, args.cwd);
+    return extractAnchors(turns);
+  }
+
+  return { findSpaces, listSessions, sessionOutline, sessionSearch, sessionRead, sessionAnchors };
 }

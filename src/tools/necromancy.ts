@@ -14,6 +14,7 @@ import {
   DEFAULT_MAX_SEARCH_MATCHES,
   type TurnRole,
 } from "../necromancy/reader.js";
+import { DEFAULT_MAX_SPACES } from "../necromancy/core.js";
 
 // The five TurnRole values, spelled out because zod enums need string
 // literals (not a TS type). `satisfies TurnRole[]` keeps this list in sync
@@ -35,9 +36,18 @@ export function registerNecromancyTools(server: McpServer, necromancy: Necromanc
   registerTool(server, {
     name: "necromancy_find_spaces",
     description:
-      "Lists Claude Code project spaces from the on-disk session graveyard (~/.claude/projects), joined with live herdr workspaces: cwd, label, workspaceId, session count, and last activity.",
-    inputSchema: {},
-    handler: async () => ({ spaces: await necromancy.findSpaces() }),
+      "Lists Claude Code project spaces from the on-disk session graveyard (~/.claude/projects), joined with live " +
+      "herdr workspaces: cwd, label, workspaceId, session count, and last activity. Newest-active first and " +
+      `capped (limit, max ${DEFAULT_MAX_SPACES}) - a machine can hold hundreds of spaces, so pass a query to narrow ` +
+      "to the one you want (case-insensitive substring over cwd/label/workspaceId) rather than dumping them all. " +
+      "Returns total and truncated: truncated:true means more matched than were returned - narrow the query. " +
+      "If you already know the exact cwd (e.g. the current project), skip this and call necromancy_list_sessions directly.",
+    inputSchema: {
+      query: z.string().optional(),
+      limit: z.number().int().min(1).max(DEFAULT_MAX_SPACES).optional(),
+    },
+    handler: async ({ query, limit }) =>
+      ({ ...(await necromancy.findSpaces({ query, limit })) }) as Record<string, unknown>,
   });
 
   registerTool(server, {
@@ -104,5 +114,20 @@ export function registerNecromancyTools(server: McpServer, necromancy: Necromanc
     },
     handler: async ({ sessionId, cwd, from, to, maxBytes }) =>
       ({ ...(await necromancy.sessionRead({ sessionId, cwd, from, to, maxBytes })) }) as Record<string, unknown>,
+  });
+
+  registerTool(server, {
+    name: "necromancy_anchors",
+    description:
+      "Deterministically extracts a session's 'always grab' anchor set - the load-bearing facts a catch-up must " +
+      "never miss: ask (first user turn), lastState (where it left off), commits, prs, versions, files touched, " +
+      "errors, tests (result lines), and decisions (user directives). Pure regex over the transcript, no model call. " +
+      "Grab these first and ground a summary on them rather than relying on a skim. Each list is deduped and capped.",
+    inputSchema: {
+      sessionId: z.string(),
+      cwd: z.string(),
+    },
+    handler: async ({ sessionId, cwd }) =>
+      ({ ...(await necromancy.sessionAnchors({ sessionId, cwd })) }) as Record<string, unknown>,
   });
 }

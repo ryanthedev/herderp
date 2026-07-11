@@ -8,9 +8,10 @@ A Claude Code plugin: a stdio **MCP server** wrapping the [`herdr`](https://gith
 - **Necromancy** — point at a space (a herdr workspace id, label, project cwd, session name, or nothing) and:
   - `necromancy_find_spaces` — scan `~/.claude/projects/*` and live workspaces, present revivable candidates.
   - `necromancy_list_sessions` — enumerate the dead sessions that lived in a space (disk is authoritative), ranked by recency, marked live vs dead, with a per-session preview.
+  - `necromancy_anchors` — deterministically regex-extract a session's "always grab" set (ask, final state, commits, PRs, versions, files touched, errors, test results, decisions) so a catch-up is grounded on evidence and misses nothing load-bearing. No model call.
   - `necromancy_outline` / `necromancy_search` / `necromancy_read` — read a past session's turns in place: outline its shape, search it by keyword or regex, and pull specific turns back verbatim, all capped on count and bytes.
 - **`necromancy` skill** — drives the find-a-space → list → outline → search → read flow conversationally.
-- **`/herderp:ghost` command** — a one-shot séance: summon the previous session, or point it at an agent/space name and/or a session id to read a specific one. Get a mini summary of what it did and where it stopped, plus resume questions. Reading only — it never revives.
+- **`/herderp:ghost` command** — a one-shot catch-up: reads the previous session, or point it at an agent/space name and/or a session id to read a specific one. Get a plain summary of what it did and where it stopped, plus resume questions. Reading only — it never revives.
 
 ## How reading works
 

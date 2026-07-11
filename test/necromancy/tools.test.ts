@@ -35,7 +35,7 @@ function stubNecromancy(overrides: Partial<Necromancy> = {}): Necromancy {
     throw new Error(`unexpected necromancy call: ${name}`);
   };
   return {
-    findSpaces: async () => [STUB_SPACE],
+    findSpaces: async () => ({ spaces: [STUB_SPACE], total: 1, truncated: false }),
     listSessions: async () => [STUB_SESSION],
     sessionOutline: unexpected("sessionOutline"),
     sessionSearch: unexpected("sessionSearch"),
@@ -74,7 +74,25 @@ describe("registerNecromancyTools - DW-3.6", () => {
     const result = await registeredTools(server).necromancy_find_spaces!.handler({}, {});
 
     expect(result.isError).toBeFalsy();
-    expect(JSON.parse(result.content[0]!.text)).toEqual({ spaces: [STUB_SPACE] });
+    expect(JSON.parse(result.content[0]!.text)).toEqual({ spaces: [STUB_SPACE], total: 1, truncated: false });
+  });
+
+  it("necromancy_find_spaces_passes_query_and_limit_through_to_the_core", async () => {
+    let received: unknown;
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerNecromancyTools(
+      server,
+      stubNecromancy({
+        findSpaces: async (options) => {
+          received = options;
+          return { spaces: [STUB_SPACE], total: 1, truncated: false };
+        },
+      }),
+    );
+
+    await registeredTools(server).necromancy_find_spaces!.handler({ query: "herderp", limit: 5 }, {});
+
+    expect(received).toEqual({ query: "herderp", limit: 5 });
   });
 
   it("DW_3_6_necromancy_list_sessions_passes_the_space_through_to_the_core", async () => {

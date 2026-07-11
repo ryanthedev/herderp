@@ -134,7 +134,7 @@ describe("necromancy core (fixture FS + stub client)", () => {
       const core = necromancy({
         client: stubClient({ workspaceList: async () => [stubWorkspace("w1", cwdA, "alpha")] }),
       });
-      const spaces = await core.findSpaces();
+      const { spaces } = await core.findSpaces();
 
       expect(spaces).toHaveLength(2);
       const spaceA = spaces.find((s) => s.cwd === cwdA);
@@ -156,11 +156,43 @@ describe("necromancy core (fixture FS + stub client)", () => {
       });
     });
 
+    it("findSpaces_caps_to_limit_newest_first_and_reports_total_and_truncated", async () => {
+      // Three spaces with distinct activity times; a limit of 2 returns the two
+      // newest and flags that more matched (the token-cap guard).
+      const cwdOld = "/tmp/proj-old";
+      const cwdMid = "/tmp/proj-mid";
+      const cwdNew = "/tmp/proj-new";
+      await writeSession(await makeSpace(cwdOld), U1, sessionContent("o", cwdOld), new Date("2026-07-01T00:00:00Z"));
+      await writeSession(await makeSpace(cwdMid), U2, sessionContent("m", cwdMid), new Date("2026-07-05T00:00:00Z"));
+      await writeSession(await makeSpace(cwdNew), U3, sessionContent("n", cwdNew), new Date("2026-07-09T00:00:00Z"));
+
+      const core = necromancy({ client: stubClient({ workspaceList: async () => [] }) });
+      const result = await core.findSpaces({ limit: 2 });
+
+      expect(result.total).toBe(3);
+      expect(result.truncated).toBe(true);
+      expect(result.spaces.map((s) => s.cwd)).toEqual([cwdNew, cwdMid]);
+    });
+
+    it("findSpaces_query_narrows_case_insensitively_over_cwd_label_and_workspaceId", async () => {
+      const cwdA = "/tmp/herderp";
+      const cwdB = "/tmp/other-proj";
+      await writeSession(await makeSpace(cwdA), U1, sessionContent("a", cwdA));
+      await writeSession(await makeSpace(cwdB), U2, sessionContent("b", cwdB));
+
+      const core = necromancy({ client: stubClient({ workspaceList: async () => [] }) });
+      const result = await core.findSpaces({ query: "HERDERP" });
+
+      expect(result.total).toBe(1);
+      expect(result.truncated).toBe(false);
+      expect(result.spaces.map((s) => s.cwd)).toEqual([cwdA]);
+    });
+
     it("DW_3_2_findSpaces_space_with_no_sessions_degrades_to_the_raw_slug", async () => {
       await mkdir(join(root, "-tmp-empty-space"), { recursive: true });
 
       const core = necromancy({ client: stubClient({ workspaceList: async () => [] }) });
-      const spaces = await core.findSpaces();
+      const { spaces } = await core.findSpaces();
 
       expect(spaces).toEqual([
         { cwd: "-tmp-empty-space", label: null, workspaceId: null, sessionCount: 0, lastActivity: null },
@@ -173,7 +205,7 @@ describe("necromancy core (fixture FS + stub client)", () => {
         client: stubClient(), // any herdr call would throw "unexpected"
       });
 
-      expect(await core.findSpaces()).toEqual([]);
+      expect(await core.findSpaces()).toEqual({ spaces: [], total: 0, truncated: false });
     });
 
     it("DW_3_2_tolerates_empty_cwd_workspaces_and_duplicate_cwds_first_listed_wins", async () => {
@@ -190,7 +222,7 @@ describe("necromancy core (fixture FS + stub client)", () => {
           ],
         }),
       });
-      const spaces = await core.findSpaces();
+      const { spaces } = await core.findSpaces();
 
       expect(spaces).toHaveLength(1);
       expect(spaces[0]!.workspaceId).toBe("w1");

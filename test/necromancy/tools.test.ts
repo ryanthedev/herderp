@@ -36,7 +36,8 @@ function stubNecromancy(overrides: Partial<Necromancy> = {}): Necromancy {
   };
   return {
     findSpaces: async () => ({ spaces: [STUB_SPACE], total: 1, truncated: false }),
-    listSessions: async () => [STUB_SESSION],
+    listSessions: async () => ({ sessions: [STUB_SESSION], degraded: false }),
+    resolveHandle: unexpected("resolveHandle"),
     sessionOutline: unexpected("sessionOutline"),
     sessionSearch: unexpected("sessionSearch"),
     sessionRead: unexpected("sessionRead"),
@@ -60,7 +61,7 @@ describe("registerNecromancyTools - DW-3.6", () => {
     registerNecromancyTools(server, stubNecromancy());
 
     const tools = registeredTools(server);
-    for (const name of ["necromancy_find_spaces", "necromancy_list_sessions"]) {
+    for (const name of ["necromancy_find_spaces", "necromancy_list_sessions", "necromancy_resolve"]) {
       expect(tools[name]).toBeDefined();
       expect(tools[name]!.description.length).toBeGreaterThan(0);
       expect(tools[name]!.inputSchema).toBeDefined();
@@ -103,7 +104,7 @@ describe("registerNecromancyTools - DW-3.6", () => {
       stubNecromancy({
         listSessions: async (cwd) => {
           received = cwd;
-          return [STUB_SESSION];
+          return { sessions: [STUB_SESSION], degraded: false };
         },
       }),
     );
@@ -111,9 +112,40 @@ describe("registerNecromancyTools - DW-3.6", () => {
     const result = await registeredTools(server).necromancy_list_sessions!.handler({ space: "/tmp/proj" }, {});
 
     expect(received).toBe("/tmp/proj");
-    expect(JSON.parse(result.content[0]!.text)).toEqual({ sessions: [STUB_SESSION] });
+    expect(JSON.parse(result.content[0]!.text)).toEqual({ sessions: [STUB_SESSION], degraded: false });
   });
 
+  it("necromancy_resolve passes the handle/workspaceId/currentSessionId through and returns the core result", async () => {
+    let received: unknown;
+    const resolved = {
+      status: "resolved" as const,
+      sessionId: "a5e24ccb-82d0-442d-b60a-502a2c9367dd",
+      cwd: "/repos/upublish",
+      workspaceLabel: "upublish",
+      matchedTabLabel: "1",
+      handle: "upublish:1",
+      live: true as const,
+      isCurrent: false,
+    };
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerNecromancyTools(
+      server,
+      stubNecromancy({
+        resolveHandle: async (args) => {
+          received = args;
+          return resolved;
+        },
+      }),
+    );
+
+    const result = await registeredTools(server).necromancy_resolve!.handler(
+      { handle: "upublish:1", workspaceId: "wC", currentSessionId: "x" },
+      {},
+    );
+
+    expect(received).toEqual({ handle: "upublish:1", workspaceId: "wC", currentSessionId: "x" });
+    expect(JSON.parse(result.content[0]!.text)).toEqual(resolved);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -301,6 +333,8 @@ describe("necromancy reader tools integration (real core, real registry) - DW-2.
       paneRun: unexpected("paneRun"),
       paneClose: unexpected("paneClose"),
       sessionList: unexpected("sessionList"),
+      tabList: unexpected("tabList"),
+      paneList: unexpected("paneList"),
     } as HerdrClient;
   }
 

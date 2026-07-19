@@ -53,9 +53,36 @@ export function registerNecromancyTools(server: McpServer, necromancy: Necromanc
   registerTool(server, {
     name: "necromancy_list_sessions",
     description:
-      "Lists Claude Code sessions for one space (its cwd), newest first, marking which are live in herdr, with a one-line preview and message count for each.",
-    inputSchema: { space: z.string() },
-    handler: async ({ space }) => ({ sessions: await necromancy.listSessions(space) }),
+      "Lists Claude Code sessions for one space (its cwd), newest first, with a one-line preview and message count " +
+      "for each. Live sessions are marked and carry their herdr handle (`<workspace-label>:<tab-label>`, e.g. " +
+      "upublish:1) so you can see which live agent each session is. Pass currentSessionId (the running session's " +
+      "own id, from $CLAUDE_CODE_SESSION_ID) to flag `current:true` on the session you're in - never read it as a " +
+      "target. Returns degraded:true when herdr was unreachable: the on-disk sessions still come back (live all " +
+      "false, no handles) - say live status is unknown rather than implying nothing is running.",
+    inputSchema: { space: z.string(), currentSessionId: z.string().optional() },
+    handler: async ({ space, currentSessionId }) =>
+      ({ ...(await necromancy.listSessions(space, { currentSessionId })) }) as Record<string, unknown>,
+  });
+
+  registerTool(server, {
+    name: "necromancy_resolve",
+    description:
+      "Resolves a herdr agent handle like `upublish:1` (workspace label : tab label) to the exact live session it " +
+      "addresses, in one shot - use this the moment a target looks like `<space>:<n>` rather than guessing from a " +
+      "session list. Returns status:'resolved' with {sessionId, cwd, handle, matchedTabLabel, isCurrent} - feed " +
+      "sessionId+cwd straight into necromancy_anchors/read. Other statuses are actionable data, not errors: " +
+      "'ambiguous_workspace'/'ambiguous_pane' carry candidates to present; 'not_found' carries a reason " +
+      "(workspace/tab/no_claude_agent/...) meaning fall through to necromancy_list_sessions and pick by on-disk " +
+      "index instead. Pass workspaceId ($HERDR_WORKSPACE_ID) to resolve a label-less `:<tab>` against the current " +
+      "space, and currentSessionId ($CLAUDE_CODE_SESSION_ID) so isCurrent flags the running session. A herdr " +
+      "outage surfaces as a tool error (herdr must be running for this) - list_sessions still works without it.",
+    inputSchema: {
+      handle: z.string(),
+      workspaceId: z.string().optional(),
+      currentSessionId: z.string().optional(),
+    },
+    handler: async ({ handle, workspaceId, currentSessionId }) =>
+      ({ ...(await necromancy.resolveHandle({ handle, workspaceId, currentSessionId })) }) as Record<string, unknown>,
   });
 
   registerTool(server, {

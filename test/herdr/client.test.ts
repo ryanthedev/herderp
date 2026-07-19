@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from "bun:test";
 import { createHerdrClient, type HerdrRunResult, type HerdrRunner } from "../../src/herdr/client.js";
-import { HerdrError, type Agent } from "../../src/herdr/types.js";
+import { HerdrError, type Agent, type Pane, type Tab } from "../../src/herdr/types.js";
 
 /** A stubbed runner that returns canned results in call order and records
  * every argv it was invoked with. */
@@ -274,6 +274,94 @@ describe("HerdrClient - DW-2.1 parse-success per method", () => {
 
     expect(calls).toEqual([["session", "list", "--json"]]);
     expect(sessions).toEqual([{ name: "default", default: true, running: true }]);
+  });
+});
+
+describe("HerdrClient - tabList/paneList (session-resolution seam)", () => {
+  const RAW_TAB = { agent_status: "idle", focused: false, label: "1", number: 7, pane_count: 1, tab_id: "wC:t7", workspace_id: "wC" };
+  const MAPPED_TAB: Tab = { id: "wC:t7", workspaceId: "wC", label: "1", number: 7, focused: false };
+  const RAW_PANE = {
+    agent: "claude",
+    agent_session: { agent: "claude", kind: "id", source: "herdr:claude", value: "a5e24ccb-82d0-442d-b60a-502a2c9367dd" },
+    agent_status: "idle",
+    cwd: "/Users/r/repos/upublish",
+    focused: false,
+    foreground_cwd: "/Users/r/repos/upublish",
+    pane_id: "wC:p8",
+    revision: 0,
+    tab_id: "wC:t7",
+    terminal_id: "term_x",
+    workspace_id: "wC",
+  };
+  const MAPPED_PANE: Pane = {
+    id: "wC:p8",
+    workspaceId: "wC",
+    tabId: "wC:t7",
+    agent: "claude",
+    sessionId: "a5e24ccb-82d0-442d-b60a-502a2c9367dd",
+    cwd: "/Users/r/repos/upublish",
+    status: "idle",
+  };
+
+  it("tabList bare spawns `tab list` and maps tab_id/label/number", async () => {
+    const { runner, calls } = stubRunner([ok(JSON.stringify({ id: "cli:tab:list", result: { tabs: [RAW_TAB], type: "tab_list" } }))]);
+    const tabs = await createHerdrClient(runner).tabList();
+    expect(calls).toEqual([["tab", "list"]]);
+    expect(tabs).toEqual([MAPPED_TAB]);
+  });
+
+  it("tabList scoped passes --workspace", async () => {
+    const { runner, calls } = stubRunner([ok(JSON.stringify({ id: "cli:tab:list", result: { tabs: [] } }))]);
+    await createHerdrClient(runner).tabList("wC");
+    expect(calls).toEqual([["tab", "list", "--workspace", "wC"]]);
+  });
+
+  it("tabList tolerates a missing label/number (null label, number 0) rather than crashing", async () => {
+    const raw = { tab_id: "wC:t7", workspace_id: "wC" }; // no label, no number
+    const { runner } = stubRunner([ok(JSON.stringify({ id: "cli:tab:list", result: { tabs: [raw] } }))]);
+    const tabs = await createHerdrClient(runner).tabList();
+    expect(tabs[0]).toEqual({ id: "wC:t7", workspaceId: "wC", label: null, number: 0, focused: false });
+  });
+
+  it("tabList throws invalid_response when result.tabs is not an array", async () => {
+    const { runner } = stubRunner([ok(JSON.stringify({ id: "cli:tab:list", result: { tabs: "nope" } }))]);
+    const err = await createHerdrClient(runner).tabList().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HerdrError);
+    expect((err as HerdrError).code).toBe("invalid_response");
+  });
+
+  it("tabList throws invalid_response when a tab entry lacks a string tab_id", async () => {
+    const { runner } = stubRunner([ok(JSON.stringify({ id: "cli:tab:list", result: { tabs: [{ workspace_id: "wC" }] } }))]);
+    const err = await createHerdrClient(runner).tabList().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HerdrError);
+    expect((err as HerdrError).code).toBe("invalid_response");
+  });
+
+  it("paneList bare spawns `pane list` and maps the pane's session", async () => {
+    const { runner, calls } = stubRunner([ok(JSON.stringify({ id: "cli:pane:list", result: { panes: [RAW_PANE], type: "pane_list" } }))]);
+    const panes = await createHerdrClient(runner).paneList();
+    expect(calls).toEqual([["pane", "list"]]);
+    expect(panes).toEqual([MAPPED_PANE]);
+  });
+
+  it("paneList scoped passes --workspace", async () => {
+    const { runner, calls } = stubRunner([ok(JSON.stringify({ id: "cli:pane:list", result: { panes: [] } }))]);
+    await createHerdrClient(runner).paneList("wC");
+    expect(calls).toEqual([["pane", "list", "--workspace", "wC"]]);
+  });
+
+  it("paneList maps a plain shell pane to empty agent/sessionId instead of crashing", async () => {
+    const shell = { pane_id: "wC:pX", workspace_id: "wC", tab_id: "wC:t9", cwd: "/tmp", agent_status: "idle" }; // no agent, no agent_session
+    const { runner } = stubRunner([ok(JSON.stringify({ id: "cli:pane:list", result: { panes: [shell] } }))]);
+    const panes = await createHerdrClient(runner).paneList();
+    expect(panes[0]).toEqual({ id: "wC:pX", workspaceId: "wC", tabId: "wC:t9", agent: "", sessionId: "", cwd: "/tmp", status: "idle" });
+  });
+
+  it("paneList throws invalid_response when a pane entry lacks structural ids", async () => {
+    const { runner } = stubRunner([ok(JSON.stringify({ id: "cli:pane:list", result: { panes: [{ pane_id: "wC:p1" }] } }))]); // no workspace_id/tab_id
+    const err = await createHerdrClient(runner).paneList().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HerdrError);
+    expect((err as HerdrError).code).toBe("invalid_response");
   });
 });
 

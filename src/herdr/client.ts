@@ -14,7 +14,9 @@ import type {
   AgentReadOptions,
   AgentStatus,
   AgentWaitOptions,
+  Pane,
   Session,
+  Tab,
   Workspace,
   WorkspaceCreateOptions,
 } from "./types.js";
@@ -48,6 +50,14 @@ export interface HerdrClient {
   paneRun(paneId: string, command: string): Promise<void>;
   paneClose(paneId: string): Promise<void>;
   sessionList(): Promise<Session[]>;
+  /** Lists tabs, all workspaces at once (bare) or scoped to one via
+   * `--workspace`. One spawn regardless - used to turn a `<workspace>:<tab>`
+   * handle into a tab id and to enrich live sessions with their handle. */
+  tabList(workspaceId?: string): Promise<Tab[]>;
+  /** Lists panes, all workspaces at once (bare) or scoped to one via
+   * `--workspace`. Tolerant mapping: shell/non-claude panes come back with
+   * empty agent/sessionId rather than throwing. */
+  paneList(workspaceId?: string): Promise<Pane[]>;
 }
 
 /** Real process runner - the only place that touches `Bun.spawn`. */
@@ -211,6 +221,53 @@ function mapWorkspaceFields(raw: unknown, argv: string[]): Omit<Workspace, "cwd"
   };
 }
 
+/** Maps one raw `tab list` entry. Requires the structural ids as strings
+ * (a malformed shape is a herdr protocol break, kept loud); tolerates a
+ * missing/null label and a non-number `number` (defaults to 0). */
+function mapTab(raw: unknown, argv: string[]): Tab {
+  if (!isRecord(raw) || typeof raw.tab_id !== "string" || typeof raw.workspace_id !== "string") {
+    throw new HerdrError(
+      "invalid_response",
+      `herdr ${argv.join(" ")}: expected a tab object with string tab_id/workspace_id, got ${JSON.stringify(raw).slice(0, 200)}`,
+    );
+  }
+  return {
+    id: raw.tab_id,
+    workspaceId: raw.workspace_id,
+    label: typeof raw.label === "string" ? raw.label : null,
+    number: typeof raw.number === "number" ? raw.number : 0,
+    focused: raw.focused === true,
+  };
+}
+
+/** Maps one raw `pane list` entry tolerantly: a pane without an agent (a
+ * plain shell) or without an agent_session yields empty agent/sessionId
+ * rather than throwing, so a mixed workspace never crashes the list. Only
+ * the structural pane/workspace/tab ids must be strings. */
+function mapPane(raw: unknown, argv: string[]): Pane {
+  if (
+    !isRecord(raw) ||
+    typeof raw.pane_id !== "string" ||
+    typeof raw.workspace_id !== "string" ||
+    typeof raw.tab_id !== "string"
+  ) {
+    throw new HerdrError(
+      "invalid_response",
+      `herdr ${argv.join(" ")}: expected a pane object with string pane_id/workspace_id/tab_id, got ${JSON.stringify(raw).slice(0, 200)}`,
+    );
+  }
+  const session = isRecord(raw.agent_session) ? raw.agent_session : undefined;
+  return {
+    id: raw.pane_id,
+    workspaceId: raw.workspace_id,
+    tabId: raw.tab_id,
+    agent: typeof raw.agent === "string" ? raw.agent : "",
+    sessionId: typeof session?.value === "string" ? session.value : "",
+    cwd: typeof raw.cwd === "string" ? raw.cwd : "",
+    status: toAgentStatus(raw.agent_status),
+  };
+}
+
 function agentReadFlags(opts?: AgentReadOptions): string[] {
   if (!opts) return [];
   const flags: string[] = [];
@@ -350,6 +407,26 @@ export function createHerdrClient(runner: HerdrRunner = bunHerdrRunner): HerdrCl
         }
         return { name: raw.name, default: raw.default, running: raw.running };
       });
+    },
+
+    async tabList(workspaceId) {
+      const argv = ["tab", "list", ...(workspaceId !== undefined ? ["--workspace", workspaceId] : [])];
+      const parsed = await runHerdr(runner, argv);
+      const tabs = unwrapResult(parsed, "tabs", argv);
+      if (!Array.isArray(tabs)) {
+        throw new HerdrError("invalid_response", `herdr ${argv.join(" ")}: expected result.tabs to be an array`);
+      }
+      return tabs.map((raw) => mapTab(raw, argv));
+    },
+
+    async paneList(workspaceId) {
+      const argv = ["pane", "list", ...(workspaceId !== undefined ? ["--workspace", workspaceId] : [])];
+      const parsed = await runHerdr(runner, argv);
+      const panes = unwrapResult(parsed, "panes", argv);
+      if (!Array.isArray(panes)) {
+        throw new HerdrError("invalid_response", `herdr ${argv.join(" ")}: expected result.panes to be an array`);
+      }
+      return panes.map((raw) => mapPane(raw, argv));
     },
   };
 }

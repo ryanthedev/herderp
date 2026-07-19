@@ -13,7 +13,7 @@ import {
   type NecromancyOptions,
 } from "../../src/necromancy/core.js";
 import { createHerdrClient, type HerdrClient, type HerdrRunner } from "../../src/herdr/client.js";
-import { HerdrError, type Agent, type Workspace } from "../../src/herdr/types.js";
+import { HerdrError, type Agent, type Pane, type Tab, type Workspace } from "../../src/herdr/types.js";
 
 const U1 = "11111111-1111-1111-1111-111111111111";
 const U2 = "22222222-2222-2222-2222-222222222222";
@@ -50,6 +50,8 @@ function stubClient(overrides: Partial<HerdrClient> = {}): HerdrClient {
     paneRun: unexpected("paneRun"),
     paneClose: unexpected("paneClose"),
     sessionList: unexpected("sessionList"),
+    tabList: unexpected("tabList"),
+    paneList: unexpected("paneList"),
     ...overrides,
   } as HerdrClient;
 }
@@ -72,6 +74,8 @@ function trackingClient(): { client: HerdrClient; calls: string[] } {
     paneRun: track("paneRun"),
     paneClose: track("paneClose"),
     sessionList: track("sessionList"),
+    tabList: track("tabList"),
+    paneList: track("paneList"),
   } as unknown as HerdrClient;
   return { client, calls };
 }
@@ -256,8 +260,14 @@ describe("necromancy core (fixture FS + stub client)", () => {
       await writeSession(dir, U2, sessionContent("newest", cwd), new Date("2026-07-08T00:00:00Z"));
       await writeSession(dir, U3, sessionContent("middle", cwd), new Date("2026-07-05T00:00:00Z"));
 
-      const core = necromancy({ client: stubClient({ agentList: async () => [stubAgent(U3)] }) });
-      const sessions = await core.listSessions(cwd);
+      const core = necromancy({
+        client: stubClient({
+          agentList: async () => [stubAgent(U3)],
+          workspaceList: async () => [],
+          tabList: async () => [],
+        }),
+      });
+      const { sessions } = await core.listSessions(cwd);
 
       expect(sessions.map((s) => s.id)).toEqual([U2, U3, U1]);
       expect(sessions.map((s) => s.live)).toEqual([false, true, false]);
@@ -284,9 +294,9 @@ describe("necromancy core (fixture FS + stub client)", () => {
 
       const core = necromancy({
         maxSessionBytes: 200,
-        client: stubClient({ agentList: async () => [] }),
+        client: stubClient({ agentList: async () => [], workspaceList: async () => [], tabList: async () => [] }),
       });
-      const sessions = await core.listSessions(cwd);
+      const { sessions } = await core.listSessions(cwd);
 
       expect(sessions.map((s) => s.id)).toEqual([U1]);
     });
@@ -301,8 +311,10 @@ describe("necromancy core (fixture FS + stub client)", () => {
       await writeFile(join(dir, "notes.jsonl"), sessionContent("not a session", cwd));
       await writeFile(join(dir, `${U3}.txt`), sessionContent("wrong extension", cwd));
 
-      const core = necromancy({ client: stubClient({ agentList: async () => [] }) });
-      const sessions = await core.listSessions(cwd);
+      const core = necromancy({
+        client: stubClient({ agentList: async () => [], workspaceList: async () => [], tabList: async () => [] }),
+      });
+      const { sessions } = await core.listSessions(cwd);
 
       expect(sessions.map((s) => s.id)).toEqual([U1]);
     });
@@ -313,9 +325,10 @@ describe("necromancy core (fixture FS + stub client)", () => {
       await writeSession(dir, U1, sessionContent("on disk", cwd));
 
       const core = necromancy({
-        client: stubClient({ agentList: async () => [stubAgent(U2)] }), // U2 live in herdr, no file
+        // U2 live in herdr, no file
+        client: stubClient({ agentList: async () => [stubAgent(U2)], workspaceList: async () => [], tabList: async () => [] }),
       });
-      const sessions = await core.listSessions(cwd);
+      const { sessions } = await core.listSessions(cwd);
 
       expect(sessions.map((s) => s.id)).toEqual([U1]); // disk is authoritative
       expect(sessions[0]!.live).toBe(false);
@@ -325,11 +338,14 @@ describe("necromancy core (fixture FS + stub client)", () => {
       const { client, calls } = trackingClient();
       const core = necromancy({ client });
 
-      expect(await core.listSessions("/no/such/space")).toEqual([]);
+      expect(await core.listSessions("/no/such/space")).toEqual({ sessions: [], degraded: false });
       expect(calls).toEqual([]);
     });
 
-    it("DW_3_3_a_herdr_failure_surfaces_as_a_typed_HerdrError_not_all_dead", async () => {
+    // Reverses the original DW-3.5 "loud" choice: a herdr outage must NOT hide
+    // the on-disk graveyard that reading depends on. listSessions now degrades
+    // (live all false, degraded:true) and still returns every on-disk session.
+    it("a_herdr_outage_degrades_listSessions_instead_of_throwing", async () => {
       const cwd = "/tmp/proj-a";
       const dir = await makeSpace(cwd);
       await writeSession(dir, U1, sessionContent("s", cwd));
@@ -341,10 +357,188 @@ describe("necromancy core (fixture FS + stub client)", () => {
           },
         }),
       });
+      const { sessions, degraded } = await core.listSessions(cwd);
+
+      expect(degraded).toBe(true);
+      expect(sessions.map((s) => s.id)).toEqual([U1]);
+      expect(sessions[0]!.live).toBe(false);
+      expect(sessions[0]!.handle).toBeUndefined();
+    });
+
+    it("a_non_herdr_fault_in_agentList_still_propagates_loud", async () => {
+      const cwd = "/tmp/proj-a";
+      const dir = await makeSpace(cwd);
+      await writeSession(dir, U1, sessionContent("s", cwd));
+
+      const core = necromancy({
+        client: stubClient({
+          agentList: async () => {
+            throw new TypeError("bug, not a herdr outage");
+          },
+        }),
+      });
       const err = await core.listSessions(cwd).catch((e: unknown) => e);
 
+      expect(err).toBeInstanceOf(TypeError);
+    });
+
+    it("enriches a live session with its herdr handle and flags the current one", async () => {
+      const cwd = "/repos/upublish";
+      const dir = await makeSpace(cwd);
+      await writeSession(dir, U1, sessionContent("live one", cwd));
+
+      const liveAgent: Agent = { agent: "claude", sessionId: U1, status: "working", cwd, workspaceId: "wC", tabId: "wC:t7", paneId: "wC:p8" };
+      const core = necromancy({
+        client: stubClient({
+          agentList: async () => [liveAgent],
+          workspaceList: async () => [stubWorkspace("wC", cwd, "upublish")],
+          tabList: async () => [{ id: "wC:t7", workspaceId: "wC", label: "1", number: 7, focused: false }],
+        }),
+      });
+      const { sessions, degraded } = await core.listSessions(cwd, { currentSessionId: U1 });
+
+      expect(degraded).toBe(false);
+      expect(sessions[0]!.live).toBe(true);
+      expect(sessions[0]!.handle).toBe("upublish:1");
+      expect(sessions[0]!.current).toBe(true);
+    });
+
+    it("omits handle/current for a non-live session and when no currentSessionId is given", async () => {
+      const cwd = "/repos/upublish";
+      const dir = await makeSpace(cwd);
+      await writeSession(dir, U1, sessionContent("dead one", cwd));
+
+      const core = necromancy({
+        client: stubClient({ agentList: async () => [], workspaceList: async () => [], tabList: async () => [] }),
+      });
+      const { sessions } = await core.listSessions(cwd);
+
+      expect(sessions[0]!.handle).toBeUndefined();
+      expect(sessions[0]!.current).toBeUndefined();
+    });
+  });
+
+  describe("resolveHandle - herdr agent address -> session", () => {
+    const WS = stubWorkspace("wC", "/repos/upublish", "upublish");
+    const TABS: Tab[] = [
+      { id: "wC:t7", workspaceId: "wC", label: "1", number: 7, focused: false },
+      { id: "wC:t8", workspaceId: "wC", label: "2", number: 8, focused: false },
+    ];
+    const PANES: Pane[] = [
+      { id: "wC:p8", workspaceId: "wC", tabId: "wC:t7", agent: "claude", sessionId: U1, cwd: "/repos/upublish", status: "idle" },
+      { id: "wC:p9", workspaceId: "wC", tabId: "wC:t8", agent: "claude", sessionId: U2, cwd: "/repos/upublish", status: "idle" },
+    ];
+    const clientFor = (workspaces: Workspace[], tabs: Tab[], panes: Pane[]) =>
+      stubClient({ workspaceList: async () => workspaces, tabList: async () => tabs, paneList: async () => panes });
+    const core = (workspaces: Workspace[], tabs: Tab[], panes: Pane[]) =>
+      necromancy({ client: clientFor(workspaces, tabs, panes) });
+
+    it("resolves `upublish:1` to the tab-1 pane's session in one shot", async () => {
+      const r = await core([WS], TABS, PANES).resolveHandle({ handle: "upublish:1" });
+      expect(r).toEqual({
+        status: "resolved",
+        sessionId: U1,
+        cwd: "/repos/upublish",
+        workspaceLabel: "upublish",
+        matchedTabLabel: "1",
+        handle: "upublish:1",
+        live: true,
+        isCurrent: false,
+      });
+    });
+
+    it("flags isCurrent when the resolved session equals currentSessionId", async () => {
+      const r = await core([WS], TABS, PANES).resolveHandle({ handle: "upublish:1", currentSessionId: U1 });
+      expect((r as { isCurrent?: boolean }).isCurrent).toBe(true);
+    });
+
+    it("falls back to positional index when the part after ':' is not a tab label, echoing the real matched label", async () => {
+      const tabs: Tab[] = [
+        { id: "wC:t7", workspaceId: "wC", label: "build", number: 7, focused: false },
+        { id: "wC:t8", workspaceId: "wC", label: "ship", number: 8, focused: false },
+      ];
+      const r = await core([WS], tabs, PANES).resolveHandle({ handle: "upublish:1" });
+      expect(r).toMatchObject({ status: "resolved", sessionId: U1, matchedTabLabel: "build", handle: "upublish:build" });
+    });
+
+    it("returns not_found:tab when neither a label nor a positional index matches", async () => {
+      const r = await core([WS], TABS, PANES).resolveHandle({ handle: "upublish:9" });
+      expect(r).toMatchObject({ status: "not_found", reason: "tab" });
+    });
+
+    it("returns not_found:no_claude_agent when the tab holds only a shell pane", async () => {
+      const panes: Pane[] = [{ ...PANES[0]!, agent: "", sessionId: "" }, PANES[1]!];
+      const r = await core([WS], TABS, panes).resolveHandle({ handle: "upublish:1" });
+      expect(r).toMatchObject({ status: "not_found", reason: "no_claude_agent" });
+    });
+
+    it("excludes a non-claude agent (e.g. codex) from resolution", async () => {
+      const panes: Pane[] = [{ ...PANES[0]!, agent: "codex", sessionId: U3 }, PANES[1]!];
+      const r = await core([WS], TABS, panes).resolveHandle({ handle: "upublish:1" });
+      expect(r).toMatchObject({ status: "not_found", reason: "no_claude_agent" });
+    });
+
+    it("returns ambiguous_workspace with candidates when a label matches two workspaces", async () => {
+      const workspaces = [stubWorkspace("wC", "/a", "scratch"), stubWorkspace("wD", "/b", "scratch")];
+      const r = await core(workspaces, TABS, PANES).resolveHandle({ handle: "scratch:1" });
+      expect(r).toMatchObject({ status: "ambiguous_workspace", query: "scratch" });
+      expect((r as { candidates: unknown[] }).candidates).toHaveLength(2);
+    });
+
+    it("widens to a substring workspace match when no label matches exactly", async () => {
+      const workspaces = [stubWorkspace("wC", "/repos/upublish", "grug-brain.mcp")];
+      const r = await core(workspaces, TABS, PANES).resolveHandle({ handle: "grug:1" });
+      expect(r).toMatchObject({ status: "resolved", sessionId: U1, handle: "grug-brain.mcp:1" });
+    });
+
+    it("returns not_found:workspace when nothing matches", async () => {
+      const r = await core([WS], TABS, PANES).resolveHandle({ handle: "nope:1" });
+      expect(r).toMatchObject({ status: "not_found", reason: "workspace" });
+    });
+
+    it("resolves a bare label to the workspace's sole claude pane (handle without a tab)", async () => {
+      const r = await core([WS], [TABS[0]!], [PANES[0]!]).resolveHandle({ handle: "upublish" });
+      expect(r).toMatchObject({ status: "resolved", sessionId: U1, matchedTabLabel: null, handle: "upublish" });
+    });
+
+    it("returns ambiguous_pane when a bare label has multiple claude panes", async () => {
+      const r = await core([WS], TABS, PANES).resolveHandle({ handle: "upublish" });
+      expect(r).toMatchObject({ status: "ambiguous_pane", workspaceLabel: "upublish" });
+      expect((r as { candidates: unknown[] }).candidates).toHaveLength(2);
+    });
+
+    it("resolves label-less `:1` against the provided current workspaceId", async () => {
+      const r = await core([WS], TABS, PANES).resolveHandle({ handle: ":1", workspaceId: "wC" });
+      expect(r).toMatchObject({ status: "resolved", sessionId: U1, handle: "upublish:1" });
+    });
+
+    it("returns not_found:no_current_workspace for a label-less handle with no workspaceId", async () => {
+      const r = await core([WS], TABS, PANES).resolveHandle({ handle: ":1" });
+      expect(r).toMatchObject({ status: "not_found", reason: "no_current_workspace" });
+    });
+
+    it("returns not_found:invalid_handle for an empty handle", async () => {
+      const r = await core([WS], TABS, PANES).resolveHandle({ handle: "  " });
+      expect(r).toMatchObject({ status: "not_found", reason: "invalid_handle" });
+    });
+
+    it("resolves a duplicate tab label to the lowest-numbered tab", async () => {
+      const tabs: Tab[] = [
+        { id: "wC:t8", workspaceId: "wC", label: "1", number: 8, focused: false },
+        { id: "wC:t7", workspaceId: "wC", label: "1", number: 7, focused: false },
+      ];
+      const r = await core([WS], tabs, PANES).resolveHandle({ handle: "upublish:1" });
+      expect(r).toMatchObject({ status: "resolved", sessionId: U1 }); // tab t7 (number 7) -> pane p8 -> U1
+    });
+
+    it("propagates a herdr outage as a thrown HerdrError (herdr required for resolution)", async () => {
+      const client = stubClient({
+        workspaceList: async () => {
+          throw new HerdrError("spawn_failed", "herdr is down");
+        },
+      });
+      const err = await necromancy({ client }).resolveHandle({ handle: "upublish:1" }).catch((e: unknown) => e);
       expect(err).toBeInstanceOf(HerdrError);
-      expect((err as HerdrError).code).toBe("spawn_failed");
     });
   });
 });

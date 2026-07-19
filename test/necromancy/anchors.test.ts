@@ -133,6 +133,8 @@ function stubClient(): HerdrClient {
     paneRun: unexpected("paneRun"),
     paneClose: unexpected("paneClose"),
     sessionList: unexpected("sessionList"),
+    tabList: unexpected("tabList"),
+    paneList: unexpected("paneList"),
   } as HerdrClient;
 }
 

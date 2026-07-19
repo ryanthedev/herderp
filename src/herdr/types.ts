@@ -31,6 +31,40 @@ export interface Workspace {
   paneCount: number;
 }
 
+/**
+ * A herdr tab within a workspace. `label` is the user-facing string herdr
+ * shows and the user types after the colon in a `<workspace>:<tab>` handle
+ * (auto-labeled "1", "2", ... but user-renameable, so not a reliable
+ * ordinal). `number` is a GLOBAL monotonic counter across all workspaces
+ * (verified live: one workspace's tabs can be number 7 and 8, another's a
+ * lone number 21) - it orders tabs WITHIN a workspace but is not a
+ * per-workspace 1-based index. `label` can be null if herdr reports none.
+ */
+export interface Tab {
+  id: string;
+  workspaceId: string;
+  label: string | null;
+  number: number;
+  focused: boolean;
+}
+
+/**
+ * A herdr pane. A pane may host an agent (`agent` = the CLI kind, e.g.
+ * "claude") or be a plain shell (`agent` = "" and `sessionId` = ""). Mapped
+ * tolerantly so a shell/non-claude pane never crashes a list - callers that
+ * need a Claude session must check `agent === "claude"` and that `sessionId`
+ * is a UUID themselves.
+ */
+export interface Pane {
+  id: string;
+  workspaceId: string;
+  tabId: string;
+  agent: string;
+  sessionId: string;
+  cwd: string;
+  status: AgentStatus;
+}
+
 export interface Session {
   name: string;
   default: boolean;

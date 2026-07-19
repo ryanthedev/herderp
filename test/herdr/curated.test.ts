@@ -35,6 +35,8 @@ function stubClient(overrides: Partial<HerdrClient> = {}): HerdrClient {
     paneRun: async () => undefined,
     paneClose: async () => undefined,
     sessionList: async () => [STUB_SESSION],
+    tabList: async () => [],
+    paneList: async () => [],
     ...overrides,
   };
 }

@@ -86,7 +86,7 @@ describe("herderp MCP server (stdio)", () => {
       const { tools } = await client.listTools();
       const names = tools.map((t) => t.name);
 
-      for (const expected of ["necromancy_find_spaces", "necromancy_list_sessions"]) {
+      for (const expected of ["necromancy_find_spaces", "necromancy_list_sessions", "necromancy_resolve"]) {
         expect(names).toContain(expected);
       }
     } finally {

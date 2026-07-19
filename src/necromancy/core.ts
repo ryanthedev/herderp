@@ -17,6 +17,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { HerdrClient } from "../herdr/client.js";
+import { HerdrError, type Pane, type Tab, type Workspace } from "../herdr/types.js";
 import { parseSessionPreview } from "./preview.js";
 import { extractAnchors, type Anchors } from "./anchors.js";
 import {
@@ -113,6 +114,66 @@ export interface SessionInfo {
   live: boolean;
   preview: string;
   messageCount: number;
+  /** The herdr handle (`<workspace-label>:<tab-label>`) for a live session,
+   * so a listing shows which live agent each session is. Absent for
+   * non-live sessions and when herdr is degraded/unreachable. */
+  handle?: string;
+  /** True only for the session whose id equals the caller-supplied
+   * currentSessionId - the session the ghost command is running in, which a
+   * catch-up must never read as its target. */
+  current?: boolean;
+}
+
+export interface ListSessionsResult {
+  sessions: SessionInfo[];
+  /** True when herdr was unreachable, so `live`/`handle` could not be
+   * determined - the on-disk sessions are still returned (live all false),
+   * never a raw error. Callers must say live status is unknown. */
+  degraded: boolean;
+}
+
+/** Resolution of a `<workspace>:<tab>` herdr handle to a live session. A
+ * discriminated union so ambiguity and misses are actionable DATA (candidates
+ * to present, a reason to fall through to the on-disk index) rather than
+ * thrown errors. herdr being unreachable still throws HerdrError. */
+export type ResolveHandleResult =
+  | {
+      status: "resolved";
+      sessionId: string;
+      cwd: string;
+      workspaceLabel: string;
+      /** The tab label actually matched - echo it so the caller can flag when
+       * it differs from what the user typed (e.g. typed ":1", matched "2"). */
+      matchedTabLabel: string | null;
+      /** Normalized `<workspaceLabel>:<matchedTabLabel>` (or just the label). */
+      handle: string;
+      live: true;
+      isCurrent: boolean;
+    }
+  | {
+      status: "ambiguous_workspace";
+      query: string;
+      candidates: { workspaceId: string; label: string | null; cwd: string }[];
+    }
+  | {
+      status: "ambiguous_pane";
+      workspaceLabel: string;
+      candidates: { paneId: string; sessionId: string; tabLabel: string | null; cwd: string }[];
+    }
+  | {
+      status: "not_found";
+      reason: "invalid_handle" | "no_current_workspace" | "workspace" | "tab" | "no_claude_agent";
+      detail: string;
+    };
+
+export interface ResolveHandleOptions {
+  handle: string;
+  /** The current workspace id (herdr's HERDR_WORKSPACE_ID), used only to
+   * resolve a label-less `:<tab>` / bare handle against the running space. */
+  workspaceId?: string;
+  /** The running session's own id (caller-supplied from CLAUDE_CODE_SESSION_ID
+   * in fresh Bash env - never the MCP server's stale spawn env). */
+  currentSessionId?: string;
 }
 
 export type Necromancy = ReturnType<typeof createNecromancy>;
@@ -131,6 +192,49 @@ interface SessionFile {
 
 function isEnoent(error: unknown): boolean {
   return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "ENOENT";
+}
+
+type WorkspaceMatch =
+  | { kind: "one"; workspace: Workspace }
+  | { kind: "many"; workspaces: Workspace[] }
+  | { kind: "none" };
+
+/**
+ * Matches a workspace by label the way a user reads it: an exact
+ * (case-insensitive) label match wins outright; only if none match exactly do
+ * we widen to substring (so `grug` finds `grug-brain.mcp`). Either tier can be
+ * ambiguous - the caller presents the candidates rather than guessing.
+ * Label-less workspaces are never matched by a non-empty query.
+ */
+function matchWorkspace(workspaces: Workspace[], label: string): WorkspaceMatch {
+  const needle = label.toLowerCase();
+  const named = workspaces.filter((w): w is Workspace & { label: string } => w.label != null);
+  const exact = named.filter((w) => w.label.toLowerCase() === needle);
+  const pool = exact.length > 0 ? exact : named.filter((w) => w.label.toLowerCase().includes(needle));
+  if (pool.length === 1) return { kind: "one", workspace: pool[0]! };
+  if (pool.length > 1) return { kind: "many", workspaces: pool };
+  return { kind: "none" };
+}
+
+/**
+ * Resolves the part after the colon in a `<workspace>:<tab>` handle to a tab.
+ * An exact (case-insensitive) tab-label match wins - herdr auto-labels tabs
+ * "1","2",... so `upublish:1` matches the tab literally labeled "1". Only when
+ * no label matches AND the part is a positive integer N do we fall back to the
+ * Nth tab by herdr's global `number` ascending (herdr's `number` is NOT a
+ * per-workspace 1-based index, so we sort-then-index rather than compare). A
+ * duplicate label resolves to the lowest-numbered of them.
+ */
+function matchTab(tabs: Tab[], tabPart: string): Tab | undefined {
+  const byNumber = [...tabs].sort((a, b) => a.number - b.number);
+  const needle = tabPart.toLowerCase();
+  const exact = byNumber.filter((t) => t.label != null && t.label.toLowerCase() === needle);
+  if (exact.length > 0) return exact[0];
+  if (/^[1-9]\d*$/.test(tabPart)) {
+    const n = Number(tabPart);
+    if (n >= 1 && n <= byNumber.length) return byNumber[n - 1];
+  }
+  return undefined;
 }
 
 export function createNecromancy(options: NecromancyOptions) {
@@ -274,14 +378,52 @@ export function createNecromancy(options: NecromancyOptions) {
     return { spaces: capped, total, truncated: capped.length < total };
   }
 
-  async function listSessions(cwd: string): Promise<SessionInfo[]> {
+  async function listSessions(
+    cwd: string,
+    options: { currentSessionId?: string } = {},
+  ): Promise<ListSessionsResult> {
+    const { currentSessionId } = options;
     const files = await scanSessionFiles(join(projectsRoot, deriveSlug(cwd)));
-    if (files.length === 0) return [];
+    if (files.length === 0) return { sessions: [], degraded: false };
 
-    // One agentList per call; a live sessionId with no on-disk file simply
-    // never matches - disk drives the list (DW-3.5). A HerdrError here
-    // propagates typed (loud) rather than silently marking everything dead.
-    const liveIds = new Set((await client.agentList()).map((agent) => agent.sessionId));
+    // Disk drives the list (DW-3.5): a live sessionId with no on-disk file
+    // simply never matches. The herdr join (live flag + `<label>:<tab>` handle
+    // enrichment) is BEST-EFFORT: if herdr is unreachable we degrade to
+    // live:false + degraded:true and still return every on-disk session,
+    // because those files need no herdr at all. This deliberately reverses the
+    // original "propagate loud" choice - a herdr outage must not hide the
+    // graveyard that reading depends on - but stays honest via `degraded`.
+    const liveIds = new Set<string>();
+    const handleBySession = new Map<string, string>();
+    let degraded = false;
+    let agents;
+    try {
+      agents = await client.agentList();
+    } catch (error) {
+      if (!(error instanceof HerdrError)) throw error; // non-herdr faults stay loud
+      agents = null;
+      degraded = true; // live status is unknown - the whole point of `degraded`
+    }
+    if (agents) {
+      for (const agent of agents) if (agent.sessionId) liveIds.add(agent.sessionId);
+      // Handle enrichment sits ON TOP of the live flag and needs two more herdr
+      // calls; if only those fail we keep the (known) live flags and just skip
+      // handles - a missing handle is not a degraded listing.
+      try {
+        const [workspaces, tabs] = await Promise.all([client.workspaceList(), client.tabList()]);
+        const wsLabelById = new Map(workspaces.map((w) => [w.id, w.label ?? w.id]));
+        const tabLabelById = new Map(tabs.map((t) => [t.id, t.label]));
+        for (const agent of agents) {
+          if (!UUID_RE.test(agent.sessionId)) continue;
+          const wsLabel = wsLabelById.get(agent.workspaceId);
+          if (wsLabel === undefined) continue;
+          const tabLabel = tabLabelById.get(agent.tabId);
+          handleBySession.set(agent.sessionId, tabLabel != null ? `${wsLabel}:${tabLabel}` : wsLabel);
+        }
+      } catch (error) {
+        if (!(error instanceof HerdrError)) throw error; // non-herdr faults stay loud
+      }
+    }
 
     const sessions: SessionInfo[] = [];
     for (const file of files) {
@@ -290,6 +432,7 @@ export function createNecromancy(options: NecromancyOptions) {
       if (text === null) continue;
       const parsed = parseSessionPreview(text);
       if (!parsed) continue; // malformed jsonl: skip, never crash
+      const handle = handleBySession.get(file.id);
       sessions.push({
         id: file.id,
         cwd,
@@ -297,9 +440,123 @@ export function createNecromancy(options: NecromancyOptions) {
         live: liveIds.has(file.id),
         preview: parsed.preview,
         messageCount: parsed.messageCount,
+        ...(handle !== undefined ? { handle } : {}),
+        ...(currentSessionId !== undefined && file.id === currentSessionId ? { current: true } : {}),
       });
     }
-    return sessions; // scanSessionFiles already ordered newest first
+    return { sessions, degraded }; // scanSessionFiles already ordered newest first
+  }
+
+  /**
+   * Turns a herdr `<workspace-label>:<tab-label>` handle (e.g. `upublish:1`)
+   * into the exact live session it addresses, deterministically - the one-shot
+   * path so a catch-up never guesses. herdr numbers nothing usefully in its
+   * agent list (every agent is named "claude"), so we resolve the way the user
+   * reads the handle: workspace by label, then tab by label (or a positional
+   * index into the workspace's tabs when the part after the colon isn't a
+   * label), then the tab's live Claude pane. Misses and ambiguity are returned
+   * as data (the caller falls through to the on-disk index or presents
+   * candidates); herdr being unreachable throws HerdrError (loud).
+   */
+  async function resolveHandle(options: ResolveHandleOptions): Promise<ResolveHandleResult> {
+    const { workspaceId, currentSessionId } = options;
+    const raw = options.handle.trim();
+    if (raw === "" || raw === ":") {
+      return { status: "not_found", reason: "invalid_handle", detail: `empty handle: ${JSON.stringify(options.handle)}` };
+    }
+    const colon = raw.indexOf(":");
+    const labelPart = (colon === -1 ? raw : raw.slice(0, colon)).trim();
+    const tabRaw = colon === -1 ? "" : raw.slice(colon + 1).trim();
+    const tabPart = tabRaw === "" ? undefined : tabRaw;
+
+    const workspaces = await client.workspaceList();
+    let ws: Workspace | undefined;
+    if (labelPart === "") {
+      if (!workspaceId) {
+        return {
+          status: "not_found",
+          reason: "no_current_workspace",
+          detail: "handle has no workspace label and no current workspaceId was provided",
+        };
+      }
+      ws = workspaces.find((w) => w.id === workspaceId);
+      if (!ws) {
+        return { status: "not_found", reason: "workspace", detail: `current workspace ${workspaceId} not found in herdr` };
+      }
+    } else {
+      const match = matchWorkspace(workspaces, labelPart);
+      if (match.kind === "none") {
+        return { status: "not_found", reason: "workspace", detail: `no herdr workspace matched "${labelPart}"` };
+      }
+      if (match.kind === "many") {
+        return {
+          status: "ambiguous_workspace",
+          query: labelPart,
+          candidates: match.workspaces.map((w) => ({ workspaceId: w.id, label: w.label, cwd: w.cwd })),
+        };
+      }
+      ws = match.workspace;
+    }
+
+    const wsLabel = ws.label ?? ws.id;
+    const [tabs, panes] = await Promise.all([client.tabList(ws.id), client.paneList(ws.id)]);
+    const wsTabs = tabs.filter((t) => t.workspaceId === ws!.id);
+    const wsPanes = panes.filter((p) => p.workspaceId === ws!.id);
+    const tabLabelById = new Map(wsTabs.map((t) => [t.id, t.label]));
+    const claudePanes = wsPanes.filter((p) => p.agent === "claude" && UUID_RE.test(p.sessionId));
+
+    let candidatePanes: Pane[];
+    let matchedTabLabel: string | null;
+    if (tabPart === undefined) {
+      candidatePanes = claudePanes;
+      matchedTabLabel = null;
+    } else {
+      const tab = matchTab(wsTabs, tabPart);
+      if (!tab) {
+        const labels = wsTabs.map((t) => t.label ?? "(unlabeled)").join(", ") || "none";
+        return { status: "not_found", reason: "tab", detail: `no tab "${tabPart}" in workspace "${wsLabel}" (tabs: ${labels})` };
+      }
+      matchedTabLabel = tab.label;
+      candidatePanes = claudePanes.filter((p) => p.tabId === tab.id);
+      if (candidatePanes.length === 0) {
+        const tabHasAnyPane = wsPanes.some((p) => p.tabId === tab.id);
+        return {
+          status: "not_found",
+          reason: "no_claude_agent",
+          detail: tabHasAnyPane
+            ? `tab "${tab.label ?? tab.id}" in workspace "${wsLabel}" has no live Claude session`
+            : `tab "${tab.label ?? tab.id}" in workspace "${wsLabel}" has no pane`,
+        };
+      }
+    }
+
+    if (candidatePanes.length === 0) {
+      return { status: "not_found", reason: "no_claude_agent", detail: `workspace "${wsLabel}" has no live Claude session` };
+    }
+    if (candidatePanes.length > 1) {
+      return {
+        status: "ambiguous_pane",
+        workspaceLabel: wsLabel,
+        candidates: candidatePanes.map((p) => ({
+          paneId: p.id,
+          sessionId: p.sessionId,
+          tabLabel: tabLabelById.get(p.tabId) ?? null,
+          cwd: p.cwd,
+        })),
+      };
+    }
+
+    const pane = candidatePanes[0]!;
+    return {
+      status: "resolved",
+      sessionId: pane.sessionId,
+      cwd: pane.cwd,
+      workspaceLabel: wsLabel,
+      matchedTabLabel,
+      handle: matchedTabLabel != null ? `${wsLabel}:${matchedTabLabel}` : wsLabel,
+      live: true,
+      isCurrent: currentSessionId !== undefined && pane.sessionId === currentSessionId,
+    };
   }
 
   /**
@@ -381,5 +638,5 @@ export function createNecromancy(options: NecromancyOptions) {
     return extractAnchors(turns);
   }
 
-  return { findSpaces, listSessions, sessionOutline, sessionSearch, sessionRead, sessionAnchors };
+  return { findSpaces, listSessions, resolveHandle, sessionOutline, sessionSearch, sessionRead, sessionAnchors };
 }

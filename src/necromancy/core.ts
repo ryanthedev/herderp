@@ -40,15 +40,20 @@ export type { Turn, TurnRole, OutlineEntry, SearchMatch, FullEntry } from "./rea
 export type { Anchors } from "./anchors.js";
 
 /**
- * Claude Code's project-directory slug: each `/` and `.` in the cwd becomes
- * `-`. A deliberate character map over the raw string - NOT path
- * normalization, which would collapse the dots the slug must preserve
- * (`/a/.b` -> `-a--b`). Reversal is lossy (`-` may mean `/`, `.`, or a
- * literal `-`), which is why findSpaces recovers cwds from live workspaces
- * or session lines instead of un-slugging.
+ * Claude Code's project-directory slug: every character that is not
+ * `[A-Za-z0-9]` becomes `-` - `/`, `.`, `_`, `@`, and any other punctuation
+ * all map to `-`. A per-character map over the raw string (NOT path
+ * normalization, which would collapse the dots the slug must preserve), and
+ * NOT collapsing: adjacent replaced chars each yield their own `-`
+ * (`/a/.b` -> `-a--b`, `prod-_x` -> `prod--x`). Restricting the map to `/`
+ * and `.` silently breaks any cwd containing `@`, `_`, etc. - the derived
+ * slug keeps the literal char while the on-disk dir has `-`, so the space is
+ * never found. Reversal is lossy (`-` may mean any replaced char or a literal
+ * `-`), which is why findSpaces recovers cwds from live workspaces or session
+ * lines instead of un-slugging.
  */
 export function deriveSlug(cwd: string): string {
-  return cwd.replace(/[/.]/g, "-");
+  return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 
 export type NecromancyErrorCode = "invalid_session_id" | "session_not_found";

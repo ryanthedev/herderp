@@ -96,6 +96,14 @@ describe("deriveSlug - DW-3.1", () => {
     expect(deriveSlug("/a/b/")).toBe("-a-b-");
     expect(deriveSlug("")).toBe("");
   });
+
+  it("DW_3_1_slug_maps_at_underscore_and_other_punctuation_to_dash", () => {
+    // Claude Code replaces every non-alphanumeric char, not just `/` and `.`.
+    expect(deriveSlug("/Users/r/@acme/pkg")).toBe("-Users-r--acme-pkg");
+    expect(deriveSlug("/a/my_proj")).toBe("-a-my-proj");
+    expect(deriveSlug("/a/prod-_x")).toBe("-a-prod--x"); // no collapsing of adjacent dashes
+    expect(deriveSlug("/a/b (1)/c")).toBe("-a-b--1--c");
+  });
 });
 
 describe("necromancy core (fixture FS + stub client)", () => {

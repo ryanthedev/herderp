@@ -21,6 +21,7 @@ import { HerdrError, type Pane, type Tab, type Workspace } from "../herdr/types.
 import { parseSessionPreview } from "./preview.js";
 import { extractAnchors, type Anchors } from "./anchors.js";
 import {
+  compileSearchPattern,
   DEFAULT_MAX_OUTLINE_ENTRIES,
   DEFAULT_MAX_READ_BYTES,
   DEFAULT_MAX_READ_SPAN,
@@ -29,11 +30,13 @@ import {
   parseTurns,
   readTurns,
   searchTurns,
+  summarizeTurnMatches,
   type OutlineOptions,
   type OutlineResult,
   type ReadResult,
   type SearchOptions,
   type SearchResult,
+  type TurnRole,
 } from "./reader.js";
 
 export type { Turn, TurnRole, OutlineEntry, SearchMatch, FullEntry } from "./reader.js";
@@ -56,7 +59,7 @@ export function deriveSlug(cwd: string): string {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 
-export type NecromancyErrorCode = "invalid_session_id" | "session_not_found";
+export type NecromancyErrorCode = "invalid_session_id" | "session_not_found" | "invalid_regex";
 
 /** Typed rejection for the session-id validation gate - never a raw string throw. */
 export class NecromancyError extends Error {
@@ -86,6 +89,12 @@ export interface NecromancyOptions {
   maxReadBytes?: number;
   /** Max entry span per sessionRead call. Default 200. */
   maxReadSpan?: number;
+  /** Max matching sessions per searchAllSessions call (newest-activity first). Default 25. */
+  maxSessionHits?: number;
+  /** Max session files whose CONTENT searchAllSessions reads before it stops
+   * (newest-mtime first). Default 200 - a machine holds thousands of
+   * transcripts and a cross-space search would otherwise read them all. */
+  maxScannedSessions?: number;
 }
 
 export interface SpaceInfo {
@@ -110,6 +119,51 @@ export interface FindSpacesResult {
   total: number;
   /** True when more matched than were returned: narrow with `query` rather than assuming it's all. */
   truncated: boolean;
+}
+
+export interface SearchAllSessionsOptions {
+  /** Case-insensitive substring over turn text, or a regex when `regex` is set. */
+  query: string;
+  /** One space's cwd to scan. Omitted: every space in the graveyard. */
+  space?: string;
+  /** Max matching sessions returned (newest-activity first). Defaults to the configured maxSessionHits. */
+  limit?: number;
+  regex?: boolean;
+  /** Max session files read before the scan stops. Defaults to the configured maxScannedSessions. */
+  maxSessions?: number;
+}
+
+/** One SESSION that matched - not one match. `matchCount` is how many of its
+ * turns hit; index/role/tool/snippet describe only the first of them. */
+export interface SessionSearchHit {
+  /** The space this session lived in (its cwd), ready to feed back into any reader tool. */
+  cwd: string;
+  sessionId: string;
+  matchCount: number;
+  /** Turn index of the first match - directly addressable by sessionRead. */
+  index: number;
+  role: TurnRole;
+  tool?: string;
+  snippet: string;
+  /** The session file's mtime: its last activity, and the sort key. */
+  mtime: number;
+  /** Absent only when the transcript had no parseable preview (malformed jsonl). */
+  messageCount?: number;
+}
+
+export interface SearchAllSessionsResult {
+  /** Matching sessions, newest-activity first, capped to `limit`. */
+  sessions: SessionSearchHit[];
+  /** Sessions that matched among those scanned - so a caller can say "25 of 60". */
+  total: number;
+  /** True when more sessions matched than were returned: narrow the query or raise limit. */
+  truncated: boolean;
+  /** Session files actually read (the stat-gated ones), newest-mtime first. */
+  scanned: number;
+  /** True when the maxSessions cap stopped the scan with candidate files left
+   * unread: everything older than the last scanned session was never looked
+   * at, so an empty/short result is NOT proof the query isn't there. */
+  scanTruncated: boolean;
 }
 
 export interface SessionInfo {
@@ -186,6 +240,12 @@ export type Necromancy = ReturnType<typeof createNecromancy>;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_MAX_SESSION_BYTES = 32 * 1024 * 1024;
 export const DEFAULT_MAX_SPACES = 40;
+export const DEFAULT_MAX_SESSION_HITS = 25;
+/** The hard bound on a cross-session search: at most this many session files
+ * are ever read per call, newest-mtime first. Every other cap in here bounds a
+ * RESPONSE; this one bounds the WORK, because searchAllSessions with no
+ * `space` is otherwise "read every transcript on the machine". */
+export const DEFAULT_MAX_SCANNED_SESSIONS = 200;
 
 /** A UUID-named .jsonl session file found on disk (stat metadata only). */
 interface SessionFile {
@@ -252,6 +312,8 @@ export function createNecromancy(options: NecromancyOptions) {
     maxSearchMatches = DEFAULT_MAX_SEARCH_MATCHES,
     maxReadBytes = DEFAULT_MAX_READ_BYTES,
     maxReadSpan = DEFAULT_MAX_READ_SPAN,
+    maxSessionHits = DEFAULT_MAX_SESSION_HITS,
+    maxScannedSessions = DEFAULT_MAX_SCANNED_SESSIONS,
   } = options;
 
   /**
@@ -308,16 +370,23 @@ export function createNecromancy(options: NecromancyOptions) {
       if (!withinSizeGate(file)) continue;
       const text = await readSessionText(file.path);
       if (text === null) continue;
-      for (const line of text.split("\n")) {
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(line);
-        } catch {
-          continue; // malformed line: keep scanning (DW-3.3 skip policy)
-        }
-        const cwd = (parsed as { cwd?: unknown } | null)?.cwd;
-        if (typeof cwd === "string" && cwd !== "") return cwd;
+      const cwd = cwdFromText(text);
+      if (cwd !== null) return cwd;
+    }
+    return null;
+  }
+
+  /** The first non-empty `cwd` a session's lines carry, or null. */
+  function cwdFromText(text: string): string | null {
+    for (const line of text.split("\n")) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue; // malformed line: keep scanning (DW-3.3 skip policy)
       }
+      const cwd = (parsed as { cwd?: unknown } | null)?.cwd;
+      if (typeof cwd === "string" && cwd !== "") return cwd;
     }
     return null;
   }
@@ -450,6 +519,103 @@ export function createNecromancy(options: NecromancyOptions) {
       });
     }
     return { sessions, degraded }; // scanSessionFiles already ordered newest first
+  }
+
+  /**
+   * Every session file in scope, newest-mtime first: one space's when `space`
+   * is a cwd, otherwise every space in the graveyard. Metadata only (readdir +
+   * stat) - no transcript is read here, so the global ordering that decides
+   * which files the scan budget is spent on is cheap.
+   */
+  async function candidateSessions(space?: string): Promise<Array<{ file: SessionFile; slug: string }>> {
+    const candidates: Array<{ file: SessionFile; slug: string }> = [];
+    if (space !== undefined) {
+      const slug = deriveSlug(space);
+      for (const file of await scanSessionFiles(join(projectsRoot, slug))) candidates.push({ file, slug });
+    } else {
+      let entries;
+      try {
+        entries = await readdir(projectsRoot, { withFileTypes: true });
+      } catch (error) {
+        if (isEnoent(error)) return []; // no graveyard at all: not a crash
+        throw error;
+      }
+      for (const dir of entries) {
+        if (!dir.isDirectory()) continue;
+        for (const file of await scanSessionFiles(join(projectsRoot, dir.name))) {
+          candidates.push({ file, slug: dir.name });
+        }
+      }
+    }
+    return candidates.sort((a, b) => b.file.mtimeMs - a.file.mtimeMs);
+  }
+
+  /**
+   * Content search ACROSS sessions - the "I know what happened, not where"
+   * entry point, where findSpaces/listSessions/sessionSearch require knowing
+   * the space first. Answers with one entry per matching SESSION (matchCount
+   * says how many of its turns hit; only the first is rendered), newest
+   * activity first.
+   *
+   * Two independent bounds, both reported rather than silent:
+   *   - `limit` caps the RESPONSE (total/truncated, exactly like findSpaces).
+   *   - `maxSessions` caps the WORK. Files are visited newest-mtime first and
+   *     the scan stops dead at the cap (scanned/scanTruncated), because with no
+   *     `space` this would otherwise read every transcript on the machine. The
+   *     stat gate still applies first, so empty/oversized files cost neither a
+   *     read nor a slot in the budget.
+   */
+  async function searchAllSessions(options: SearchAllSessionsOptions): Promise<SearchAllSessionsResult> {
+    const { query, space, limit = maxSessionHits, regex = false, maxSessions = maxScannedSessions } = options;
+
+    // searchTurns treats an invalid pattern as a literal substring; a scan of
+    // hundreds of files must not silently answer a different question than the
+    // caller asked, so here it is a typed error instead.
+    if (regex && compileSearchPattern(query) === null) {
+      throw new NecromancyError("invalid_regex", `not a valid regular expression: ${JSON.stringify(query.slice(0, 80))}`);
+    }
+
+    // Slug -> cwd, resolved from the transcript we already hold (never a second
+    // read) and only for spaces that produced a hit. Degrades to the raw slug
+    // like findSpaces does when no line carries a cwd.
+    const cwdBySlug = new Map<string, string>();
+    if (space !== undefined) cwdBySlug.set(deriveSlug(space), space);
+
+    const hits: SessionSearchHit[] = [];
+    let scanned = 0;
+    let scanTruncated = false;
+    for (const { file, slug } of await candidateSessions(space)) {
+      if (scanned >= maxSessions) {
+        scanTruncated = true; // candidates remain: say so, never truncate silently
+        break;
+      }
+      if (!withinSizeGate(file)) continue;
+      const text = await readSessionText(file.path);
+      if (text === null) continue; // deleted mid-scan: skip
+      scanned += 1;
+
+      const { matchCount, first } = summarizeTurnMatches(parseTurns(text), query, { regex });
+      if (!first) continue;
+      let cwd = cwdBySlug.get(slug);
+      if (cwd === undefined) {
+        cwd = cwdFromText(text) ?? slug;
+        cwdBySlug.set(slug, cwd);
+      }
+      const preview = parseSessionPreview(text);
+      hits.push({
+        cwd,
+        sessionId: file.id,
+        matchCount,
+        ...first,
+        mtime: file.mtimeMs,
+        ...(preview ? { messageCount: preview.messageCount } : {}),
+      });
+    }
+
+    // Candidates were visited newest-first, so hits are already in that order.
+    const total = hits.length;
+    const capped = hits.slice(0, Math.max(0, limit));
+    return { sessions: capped, total, truncated: capped.length < total, scanned, scanTruncated };
   }
 
   /**
@@ -643,5 +809,14 @@ export function createNecromancy(options: NecromancyOptions) {
     return extractAnchors(turns);
   }
 
-  return { findSpaces, listSessions, resolveHandle, sessionOutline, sessionSearch, sessionRead, sessionAnchors };
+  return {
+    findSpaces,
+    listSessions,
+    searchAllSessions,
+    resolveHandle,
+    sessionOutline,
+    sessionSearch,
+    sessionRead,
+    sessionAnchors,
+  };
 }

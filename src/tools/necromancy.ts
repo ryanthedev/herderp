@@ -14,7 +14,11 @@ import {
   DEFAULT_MAX_SEARCH_MATCHES,
   type TurnRole,
 } from "../necromancy/reader.js";
-import { DEFAULT_MAX_SPACES } from "../necromancy/core.js";
+import {
+  DEFAULT_MAX_SCANNED_SESSIONS,
+  DEFAULT_MAX_SESSION_HITS,
+  DEFAULT_MAX_SPACES,
+} from "../necromancy/core.js";
 
 // The five TurnRole values, spelled out because zod enums need string
 // literals (not a TS type). `satisfies TurnRole[]` keeps this list in sync
@@ -30,7 +34,7 @@ const TURN_ROLES = ["user", "thinking", "text", "tool_use", "tool_result"] as co
 
 /**
  * Registers the necromancy tools on `server`, backed by `necromancy`:
- * find_spaces, list_sessions, outline, search, read.
+ * find_spaces, search_all, list_sessions, resolve, outline, search, read, anchors.
  */
 export function registerNecromancyTools(server: McpServer, necromancy: Necromancy): void {
   registerTool(server, {
@@ -48,6 +52,39 @@ export function registerNecromancyTools(server: McpServer, necromancy: Necromanc
     },
     handler: async ({ query, limit }) =>
       ({ ...(await necromancy.findSpaces({ query, limit })) }) as Record<string, unknown>,
+  });
+
+  registerTool(server, {
+    name: "necromancy_search_all",
+    description:
+      "Searches the CONTENT of many past Claude Code sessions at once and reports WHICH sessions matched - reach " +
+      "for this the moment the user knows what happened but not where (\"that session where we fixed the flaky " +
+      "login test\", no cwd and no session id). This is the entry point: use it INSTEAD of guessing a space with " +
+      "necromancy_find_spaces and then hunting session by session with necromancy_search. Scans every space in the " +
+      "graveyard by default; pass space (a cwd) to scan just one. Returns ONE entry per matching session - " +
+      "{cwd, sessionId, matchCount, the first match's index/role/tool + a bounded snippet, mtime, messageCount} - " +
+      "newest-activity first; matchCount is how many turns matched INSIDE that session, so a big number means look " +
+      "there, not that you were given that many results. regex:true switches the query from case-insensitive " +
+      "substring to a regex pattern (an invalid pattern comes back as an error, never a silent literal search). " +
+      "Two independent bounds, both reported: truncated:true means more sessions matched than limit returned " +
+      `(max ${DEFAULT_MAX_SESSION_HITS}) - narrow the query; scanTruncated:true means the scan stopped after ` +
+      `maxSessions files (max ${DEFAULT_MAX_SCANNED_SESSIONS}, newest first - scanned says how many were read), so ` +
+      "everything older was never looked at and a thin result is NOT proof the query isn't there - say so, and " +
+      "narrow with space rather than implying the search was exhaustive. Next: take a hit's cwd+sessionId into " +
+      "necromancy_anchors/necromancy_outline, its index straight into necromancy_read, or necromancy_search on " +
+      "that one session for every match inside it.",
+    inputSchema: {
+      query: z.string(),
+      space: z.string().optional(),
+      limit: z.number().int().min(1).max(DEFAULT_MAX_SESSION_HITS).optional(),
+      regex: z.boolean().optional(),
+      maxSessions: z.number().int().min(1).max(DEFAULT_MAX_SCANNED_SESSIONS).optional(),
+    },
+    handler: async ({ query, space, limit, regex, maxSessions }) =>
+      ({ ...(await necromancy.searchAllSessions({ query, space, limit, regex, maxSessions })) }) as Record<
+        string,
+        unknown
+      >,
   });
 
   registerTool(server, {

@@ -63,17 +63,22 @@ describe("herderp MCP server (stdio)", () => {
       const names = tools.map((t) => t.name);
 
       for (const expected of [
-        "herdr_agent_list",
-        "herdr_agent_get",
-        "herdr_agent_read",
-        "herdr_agent_wait",
-        "herdr_workspace_create",
-        "herdr_workspace_focus",
-        "herdr_pane_run",
-        "herdr_pane_close",
+        "herdr_agent",
+        "herdr_pane",
+        "herdr_tab",
+        "herdr_workspace",
+        "herdr_worktree",
         "herdr_session_list",
       ]) {
         expect(names).toContain(expected);
+      }
+
+      // The resource+action collapse is load-bearing for tool-surface size:
+      // assert the retired per-subcommand names are really gone, so a
+      // reintroduction is caught here rather than silently doubling the
+      // surface every consuming session pays for.
+      for (const retired of ["herdr_agent_list", "herdr_pane_run", "herdr_workspace_create"]) {
+        expect(names).not.toContain(retired);
       }
     } finally {
       await transport.close();
@@ -86,7 +91,12 @@ describe("herderp MCP server (stdio)", () => {
       const { tools } = await client.listTools();
       const names = tools.map((t) => t.name);
 
-      for (const expected of ["necromancy_find_spaces", "necromancy_list_sessions", "necromancy_resolve"]) {
+      for (const expected of [
+        "necromancy_find_spaces",
+        "necromancy_search_all",
+        "necromancy_list_sessions",
+        "necromancy_resolve",
+      ]) {
         expect(names).toContain(expected);
       }
     } finally {

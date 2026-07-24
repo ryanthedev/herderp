@@ -38,7 +38,7 @@ function stubClient(): HerdrClient {
     sessionList: unexpected("sessionList"),
     tabList: unexpected("tabList"),
     paneList: unexpected("paneList"),
-  } as HerdrClient;
+  } as unknown as HerdrClient;
 }
 
 // ---------------------------------------------------------------------------

@@ -278,10 +278,10 @@ describe("necromancy core (fixture FS + stub client)", () => {
       });
       const { sessions } = await core.listSessions(cwd);
 
-      expect(sessions.map((s) => s.id)).toEqual([U2, U3, U1]);
+      expect(sessions.map((s) => s.sessionId)).toEqual([U2, U3, U1]);
       expect(sessions.map((s) => s.live)).toEqual([false, true, false]);
       expect(sessions[0]).toEqual({
-        id: U2,
+        sessionId: U2,
         cwd,
         mtime: new Date("2026-07-08T00:00:00Z").getTime(),
         live: false,
@@ -307,7 +307,7 @@ describe("necromancy core (fixture FS + stub client)", () => {
       });
       const { sessions } = await core.listSessions(cwd);
 
-      expect(sessions.map((s) => s.id)).toEqual([U1]);
+      expect(sessions.map((s) => s.sessionId)).toEqual([U1]);
     });
 
     it("DW_3_3_excludes_nested_subagents_dir_and_non_uuid_filenames", async () => {
@@ -325,7 +325,7 @@ describe("necromancy core (fixture FS + stub client)", () => {
       });
       const { sessions } = await core.listSessions(cwd);
 
-      expect(sessions.map((s) => s.id)).toEqual([U1]);
+      expect(sessions.map((s) => s.sessionId)).toEqual([U1]);
     });
 
     it("DW_3_5_live_id_without_file_does_not_break_listSessions", async () => {
@@ -339,7 +339,7 @@ describe("necromancy core (fixture FS + stub client)", () => {
       });
       const { sessions } = await core.listSessions(cwd);
 
-      expect(sessions.map((s) => s.id)).toEqual([U1]); // disk is authoritative
+      expect(sessions.map((s) => s.sessionId)).toEqual([U1]); // disk is authoritative
       expect(sessions[0]!.live).toBe(false);
     });
 
@@ -369,7 +369,7 @@ describe("necromancy core (fixture FS + stub client)", () => {
       const { sessions, degraded } = await core.listSessions(cwd);
 
       expect(degraded).toBe(true);
-      expect(sessions.map((s) => s.id)).toEqual([U1]);
+      expect(sessions.map((s) => s.sessionId)).toEqual([U1]);
       expect(sessions[0]!.live).toBe(false);
       expect(sessions[0]!.handle).toBeUndefined();
     });
@@ -471,7 +471,7 @@ describe("necromancy core (fixture FS + stub client)", () => {
       expect(all.sessions.map((s) => s.cwd)).toEqual([cwdB, cwdA]); // newest first
       expect(all.total).toBe(2);
 
-      const scoped = await core.searchAllSessions({ query: "release blocker", space: cwdA });
+      const scoped = await core.searchAllSessions({ query: "release blocker", cwd: cwdA });
       expect(scoped.sessions.map((s) => s.sessionId)).toEqual([U1]);
       expect(scoped.scanned).toBe(1); // the other space is never read at all
     });

@@ -78,5 +78,29 @@
   {
     "query": "My aider session for the backend repo died when I lost wifi — can you help me get back into that coding session and figure out where it left off?",
     "should_trigger": false
+  },
+  {
+    "query": "My Windsurf editor crashed and I lost the AI pair-programming session I had going on the billing service — can you get it back?",
+    "should_trigger": false
+  },
+  {
+    "query": "I use tmux-resurrect and my pane layout got wiped after a reboot — can you restore the terminal session I had before?",
+    "should_trigger": false
+  },
+  {
+    "query": "My Codex CLI session for the payments refactor died overnight, can you help me resume where that agent left off?",
+    "should_trigger": false
+  },
+  {
+    "query": "Can you recover my terminal scrollback from earlier — I had a bunch of command output I need and I scrolled past it?",
+    "should_trigger": false
+  },
+  {
+    "query": "What did that session from yesterday in this repo actually end up doing? I want to catch up before I keep going.",
+    "should_trigger": true
+  },
+  {
+    "query": "Dig up the previous agent run for ~/code/webhooks and show me what it tried — I lost track of where it got to.",
+    "should_trigger": true
   }
 ]

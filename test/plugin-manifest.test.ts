@@ -11,6 +11,7 @@
 
 import { describe, expect, it } from "bun:test";
 import path from "node:path";
+import { SERVER_VERSION } from "../src/server.js";
 
 const ROOT = path.join(import.meta.dir, "..");
 
@@ -26,6 +27,17 @@ describe("plugin manifest (.claude-plugin/plugin.json)", () => {
   it("does not declare mcpServers inline (registered via sibling .mcp.json instead)", async () => {
     const manifest = await Bun.file(path.join(ROOT, ".claude-plugin", "plugin.json")).json();
     expect(manifest.mcpServers).toBeUndefined();
+  });
+
+  // Regression guard: plugin.json's version silently lagged two releases
+  // behind package.json (shipped 0.6.0 while the manifest still said 0.5.0)
+  // because nothing checked. The manifest, the package, and the version the
+  // running server reports over MCP must move together.
+  it("keeps plugin.json, package.json, and SERVER_VERSION in lockstep", async () => {
+    const manifest = await Bun.file(path.join(ROOT, ".claude-plugin", "plugin.json")).json();
+    const pkg = await Bun.file(path.join(ROOT, "package.json")).json();
+    expect(manifest.version).toBe(pkg.version);
+    expect(SERVER_VERSION).toBe(pkg.version);
   });
 });
 

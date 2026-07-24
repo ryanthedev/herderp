@@ -10,7 +10,7 @@ Drive the **necromancy** skill's reading flow (`necromancy_resolve` / `necromanc
 **Know who you are first.** Before resolving anything, get the running session's own id and herdr location from a **fresh Bash env** — `echo "$CLAUDE_CODE_SESSION_ID $HERDR_WORKSPACE_ID"`. Pass the session id as `currentSessionId` and the workspace id as `workspaceId` into `necromancy_resolve` and `necromancy_list_sessions`. Do **not** rely on the MCP server to know this — its env is baked at spawn and goes stale across `/clear`/resume, so only the Bash value is trustworthy. This is what lets you say "that's this very session" instead of accidentally reading yourself (the bug this command is built to avoid).
 
 **Resolve the target in one shot — never dump the whole graveyard.** `necromancy_find_spaces` lists *every* project on the machine (there can be hundreds), so calling it bare blows the tool-result token cap. Two rules:
-- If you already know the exact cwd — the **current project** you're running in — skip `find_spaces` entirely and call `necromancy_list_sessions({ space: <cwd> })` directly.
+- If you already know the exact cwd — the **current project** you're running in — skip `find_spaces` entirely and call `necromancy_list_sessions({ cwd })` directly.
 - Otherwise pass a `query` so it returns only the matching space(s): `necromancy_find_spaces({ query: "<name>" })`. It comes back newest-active first with `total`/`truncated`; if `truncated` is true, say so and narrow rather than implying you saw them all.
 
 **Argument shorthand — `<space>:<n>` is a herdr agent address, resolved by a precedence ladder.** In herdr, `upublish:1` means "the upublish workspace, the agent in the tab labeled `1`" — a *live* agent, not "the Nth session file on disk". Resolve it that way, in this order, and **always tell the user which rung answered**:
@@ -19,7 +19,7 @@ Drive the **necromancy** skill's reading flow (`necromancy_resolve` / `necromanc
    - `status:"resolved"` → you have the exact `sessionId` + `cwd`. Go straight to anchors + read. Note in your reply what it resolved to, e.g. "resolved `upublish:1` → the live agent in tab `1`, session a5e2…". If `matchedTabLabel` differs from what the user typed (you typed `:1`, it matched the tab labeled `2` positionally), **say so**.
    - `status:"ambiguous_workspace"` / `"ambiguous_pane"` → present the `candidates` and ask which; never silently pick one.
    - `status:"not_found"` → fall through to rung 2 (the session is likely **dead** — no live tab addresses it).
-2. **On-disk index rung (dead sessions).** Call `necromancy_list_sessions({ space, currentSessionId })` and take the **Nth session newest-first, skipping any with `current:true`** (that's this ghost session — never the target). Announce this: "no live tab `1` in upublish — read the 1st past session on disk, 3f9c…".
+2. **On-disk index rung (dead sessions).** Call `necromancy_list_sessions({ cwd, currentSessionId })` and take the **Nth session newest-first, skipping any with `current:true`** (that's this ghost session — never the target). Announce this: "no live tab `1` in upublish — read the 1st past session on disk, 3f9c…".
 3. If the index is out of range, say how many sessions the space actually has rather than guessing.
 
 Other forms:

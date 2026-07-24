@@ -20,6 +20,7 @@ import {
   type SessionInfo,
   type SpaceInfo,
 } from "../../src/necromancy/core.js";
+import { DEFAULT_MAX_SCANNED_SESSIONS, DEFAULT_MAX_SESSION_HITS } from "../../src/necromancy/core.js";
 import { DEFAULT_MAX_OUTLINE_ENTRIES, DEFAULT_MAX_READ_BYTES, DEFAULT_MAX_SEARCH_MATCHES } from "../../src/necromancy/reader.js";
 import type { HerdrClient } from "../../src/herdr/client.js";
 
@@ -38,6 +39,7 @@ function stubNecromancy(overrides: Partial<Necromancy> = {}): Necromancy {
     findSpaces: async () => ({ spaces: [STUB_SPACE], total: 1, truncated: false }),
     listSessions: async () => ({ sessions: [STUB_SESSION], degraded: false }),
     resolveHandle: unexpected("resolveHandle"),
+    searchAllSessions: unexpected("searchAllSessions"),
     sessionOutline: unexpected("sessionOutline"),
     sessionSearch: unexpected("sessionSearch"),
     sessionRead: unexpected("sessionRead"),
@@ -61,7 +63,7 @@ describe("registerNecromancyTools - DW-3.6", () => {
     registerNecromancyTools(server, stubNecromancy());
 
     const tools = registeredTools(server);
-    for (const name of ["necromancy_find_spaces", "necromancy_list_sessions", "necromancy_resolve"]) {
+    for (const name of ["necromancy_find_spaces", "necromancy_list_sessions", "necromancy_resolve", "necromancy_search_all"]) {
       expect(tools[name]).toBeDefined();
       expect(tools[name]!.description.length).toBeGreaterThan(0);
       expect(tools[name]!.inputSchema).toBeDefined();
@@ -113,6 +115,79 @@ describe("registerNecromancyTools - DW-3.6", () => {
 
     expect(received).toBe("/tmp/proj");
     expect(JSON.parse(result.content[0]!.text)).toEqual({ sessions: [STUB_SESSION], degraded: false });
+  });
+
+  it("necromancy_search_all passes query/space/limit/regex/maxSessions through and returns the core result", async () => {
+    let received: unknown;
+    const found = {
+      sessions: [
+        {
+          cwd: "/tmp/proj",
+          sessionId: STUB_SESSION.id,
+          matchCount: 3,
+          index: 7,
+          role: "text" as const,
+          snippet: "…the flaky login test…",
+          mtime: 1720000000000,
+          messageCount: 12,
+        },
+      ],
+      total: 1,
+      truncated: false,
+      scanned: 4,
+      scanTruncated: false,
+    };
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerNecromancyTools(
+      server,
+      stubNecromancy({
+        searchAllSessions: async (args) => {
+          received = args;
+          return found;
+        },
+      }),
+    );
+
+    const result = await registeredTools(server).necromancy_search_all!.handler(
+      { query: "flaky login", space: "/tmp/proj", limit: 5, regex: false, maxSessions: 10 },
+      {},
+    );
+
+    expect(received).toEqual({ query: "flaky login", space: "/tmp/proj", limit: 5, regex: false, maxSessions: 10 });
+    expect(JSON.parse(result.content[0]!.text)).toEqual(found);
+  });
+
+  it("necromancy_search_all caps limit and maxSessions in its input schema", async () => {
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerNecromancyTools(server, stubNecromancy());
+    type Parseable = { safeParse: (value: unknown) => { success: boolean } };
+    const schema = registeredTools(server).necromancy_search_all!.inputSchema as unknown as Parseable;
+
+    expect(schema.safeParse({ query: "q", limit: DEFAULT_MAX_SESSION_HITS }).success).toBe(true);
+    expect(schema.safeParse({ query: "q", maxSessions: DEFAULT_MAX_SCANNED_SESSIONS }).success).toBe(true);
+    // The core deliberately does not clamp caller values, so the ceiling is here.
+    expect(schema.safeParse({ query: "q", limit: DEFAULT_MAX_SESSION_HITS + 1 }).success).toBe(false);
+    expect(schema.safeParse({ query: "q", maxSessions: DEFAULT_MAX_SCANNED_SESSIONS + 1 }).success).toBe(false);
+  });
+
+  it("necromancy_search_all surfaces an invalid regex as isError, not a crash", async () => {
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerNecromancyTools(
+      server,
+      stubNecromancy({
+        searchAllSessions: async () => {
+          throw new NecromancyError("invalid_regex", 'not a valid regular expression: "[unclosed"');
+        },
+      }),
+    );
+
+    const result = await registeredTools(server).necromancy_search_all!.handler(
+      { query: "[unclosed", regex: true },
+      {},
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("not a valid regular expression");
   });
 
   it("necromancy_resolve passes the handle/workspaceId/currentSessionId through and returns the core result", async () => {
@@ -335,7 +410,7 @@ describe("necromancy reader tools integration (real core, real registry) - DW-2.
       sessionList: unexpected("sessionList"),
       tabList: unexpected("tabList"),
       paneList: unexpected("paneList"),
-    } as HerdrClient;
+    } as unknown as HerdrClient;
   }
 
   it("DW_2_2_outline_search_read_integration_over_a_fixture_session_via_the_real_registry", async () => {

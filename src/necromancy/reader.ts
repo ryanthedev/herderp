@@ -215,6 +215,37 @@ export interface SearchOptions {
   regex?: boolean;
 }
 
+/** One turn's match position, or null when the turn doesn't match. */
+interface TurnMatch {
+  at: number;
+  length: number;
+}
+
+/**
+ * `query` as a case-insensitive RegExp, or null when it is not a valid
+ * pattern. The two callers disagree about what invalid means - searchTurns
+ * falls back to a literal substring search, core.searchAllSessions raises a
+ * typed error - so the decision stays with them rather than in here.
+ */
+export function compileSearchPattern(query: string): RegExp | null {
+  try {
+    return new RegExp(query, "i");
+  } catch {
+    return null;
+  }
+}
+
+/** First hit of `pattern` (when given) or of `query` as a case-insensitive substring. */
+function findMatch(text: string, query: string, pattern: RegExp | null): TurnMatch | null {
+  if (pattern) {
+    const found = pattern.exec(text);
+    return found ? { at: found.index, length: found[0].length } : null;
+  }
+  if (query === "") return null;
+  const at = text.toLowerCase().indexOf(query.toLowerCase());
+  return at === -1 ? null : { at, length: query.length };
+}
+
 /** A bounded window of `text` around `matchIndex`, whitespace-collapsed. */
 function buildSnippet(text: string, matchIndex: number, matchLength: number): string {
   const start = Math.max(0, matchIndex - SNIPPET_CONTEXT_CHARS);
@@ -227,46 +258,66 @@ function buildSnippet(text: string, matchIndex: number, matchLength: number): st
 /** Case-insensitive lexical (or, if `regex`, pattern) match over entry text. */
 export function searchTurns(turns: Turn[], query: string, options: SearchOptions = {}): SearchResult {
   const { limit = DEFAULT_MAX_SEARCH_MATCHES, regex = false } = options;
-
-  let pattern: RegExp | null = null;
-  if (regex) {
-    try {
-      pattern = new RegExp(query, "i");
-    } catch {
-      pattern = null; // invalid pattern: fall back to literal substring search below, never crash
-    }
-  }
+  // invalid pattern: fall back to a literal substring search, never crash
+  const pattern = regex ? compileSearchPattern(query) : null;
 
   const matches: SearchMatch[] = [];
   let truncated = false;
 
   for (const turn of turns) {
-    let matchIndex = -1;
-    let matchLength = query.length;
-    if (pattern) {
-      const found = pattern.exec(turn.text);
-      if (found) {
-        matchIndex = found.index;
-        matchLength = found[0].length;
-      }
-    } else if (query !== "") {
-      matchIndex = turn.text.toLowerCase().indexOf(query.toLowerCase());
-    }
-    if (matchIndex === -1) continue;
+    const match = findMatch(turn.text, query, pattern);
+    if (!match) continue;
 
     if (matches.length >= limit) {
       truncated = true;
       break;
     }
-    matches.push({
-      index: turn.index,
-      role: turn.role,
-      ...(turn.tool !== undefined && { tool: turn.tool }),
-      snippet: buildSnippet(turn.text, matchIndex, matchLength),
-    });
+    matches.push(toMatch(turn, match));
   }
 
   return { matches, truncated };
+}
+
+function toMatch(turn: Turn, match: TurnMatch): SearchMatch {
+  return {
+    index: turn.index,
+    role: turn.role,
+    ...(turn.tool !== undefined && { tool: turn.tool }),
+    snippet: buildSnippet(turn.text, match.at, match.length),
+  };
+}
+
+/** How one whole session answers a search: how many of its turns matched, and
+ * the first one as the single representative hit. */
+export interface TurnMatchSummary {
+  /** Every matching turn is counted - unlike searchTurns there is no cap here,
+   * because the count is the point (one session collapses to one entry). */
+  matchCount: number;
+  /** The first matching turn (index/role/tool + bounded snippet), or null when none did. */
+  first: SearchMatch | null;
+}
+
+/**
+ * Same matching rule as searchTurns, summarized per session instead of per
+ * turn - what cross-session search needs, where a session that mentions the
+ * query forty times is still one result carrying `matchCount: 40`.
+ */
+export function summarizeTurnMatches(
+  turns: Turn[],
+  query: string,
+  options: { regex?: boolean } = {},
+): TurnMatchSummary {
+  const pattern = options.regex ? compileSearchPattern(query) : null;
+
+  let matchCount = 0;
+  let first: SearchMatch | null = null;
+  for (const turn of turns) {
+    const match = findMatch(turn.text, query, pattern);
+    if (!match) continue;
+    matchCount += 1;
+    if (!first) first = toMatch(turn, match); // only the first hit is ever rendered
+  }
+  return { matchCount, first };
 }
 
 export interface ReadOptions {

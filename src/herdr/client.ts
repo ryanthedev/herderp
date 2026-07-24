@@ -12,13 +12,19 @@
 import type {
   Agent,
   AgentReadOptions,
+  AgentStartOptions,
   AgentStatus,
   AgentWaitOptions,
   Pane,
   Session,
   Tab,
+  TabCreateOptions,
   Workspace,
   WorkspaceCreateOptions,
+  Worktree,
+  WorktreeCreateOptions,
+  WorktreeOpenOptions,
+  WorktreeScope,
 } from "./types.js";
 import { HerdrError } from "./types.js";
 
@@ -58,6 +64,95 @@ export interface HerdrClient {
    * `--workspace`. Tolerant mapping: shell/non-claude panes come back with
    * empty agent/sessionId rather than throwing. */
   paneList(workspaceId?: string): Promise<Pane[]>;
+
+  // --- Mutating agent control -------------------------------------------
+  // Every method below that returns void reports success purely by exit
+  // code. That is deliberate: herdr's success envelopes for these mutating
+  // subcommands could not be verified without running them against a live
+  // workspace, and exit code IS verified (errors always exit nonzero with a
+  // `{error:{code,message}}` body). Asserting an unverified result shape
+  // would invent a contract; ignoring stdout cannot be wrong.
+
+  /** Types literal text into the agent (no trailing Enter - use paneRun when
+   * you want command text plus Enter). */
+  agentSend(target: string, text: string): Promise<void>;
+  agentFocus(target: string): Promise<void>;
+  /** Renames an agent, or clears a custom name when `name` is null. */
+  agentRename(target: string, name: string | null): Promise<void>;
+  agentStart(opts: AgentStartOptions): Promise<void>;
+  /** `agent explain --json` returns a FLAT object with no `{id,result}`
+   * envelope (verified live) - passed through as-is rather than mapped, since
+   * its keys are herdr's diagnostic surface and not a pinned seam. */
+  agentExplain(target: string): Promise<Record<string, unknown>>;
+
+  // --- Pane / tab / workspace lifecycle ---------------------------------
+
+  paneGet(paneId: string): Promise<Pane>;
+  paneRename(paneId: string, name: string | null): Promise<void>;
+  /** Directional focus - herdr moves focus relative to a pane rather than
+   * focusing one by id (`pane focus --direction`). Pass `paneId` to anchor
+   * the move, or omit it to anchor on the current pane (`--current`). */
+  paneFocusDirection(direction: PaneDirection, paneId?: string): Promise<void>;
+  paneSplit(opts: PaneSplitOptions): Promise<void>;
+  paneSwap(opts: PaneSwapOptions): Promise<void>;
+  paneMove(opts: PaneMoveOptions): Promise<void>;
+
+  tabGet(tabId: string): Promise<Tab>;
+  /** Returns the created tab when herdr's create envelope carries one, else
+   * null - the create response shape is unverified (see the block comment
+   * above), so a missing `result.tab` degrades instead of throwing. */
+  tabCreate(opts: TabCreateOptions): Promise<Tab | null>;
+  tabRename(tabId: string, label: string): Promise<void>;
+  tabFocus(tabId: string): Promise<void>;
+  tabClose(tabId: string): Promise<void>;
+
+  workspaceGet(id: string): Promise<Workspace>;
+  workspaceRename(id: string, label: string): Promise<void>;
+  workspaceClose(id: string): Promise<void>;
+
+  // --- Worktrees ---------------------------------------------------------
+
+  /** Lists git worktrees. Scope defaults to herdr's FOCUSED workspace, NOT
+   * the caller's $HERDR_WORKSPACE_ID (verified live) - pass a scope. */
+  worktreeList(scope?: WorktreeScope): Promise<Worktree[]>;
+  worktreeCreate(opts: WorktreeCreateOptions): Promise<void>;
+  worktreeOpen(opts: WorktreeOpenOptions): Promise<void>;
+  worktreeRemove(workspaceId: string, force?: boolean): Promise<void>;
+}
+
+export type PaneDirection = "left" | "right" | "up" | "down";
+
+export interface PaneSplitOptions {
+  direction: "right" | "down";
+  paneId?: string;
+  ratio?: number;
+  cwd?: string;
+  env?: string[];
+  focus?: boolean;
+}
+
+/** herdr accepts two forms: an explicit source/target pair, or a directional
+ * swap anchored on a pane. Exactly one form must be supplied. */
+export interface PaneSwapOptions {
+  sourcePaneId?: string;
+  targetPaneId?: string;
+  direction?: PaneDirection;
+  paneId?: string;
+}
+
+/** herdr accepts three destinations: an existing tab, a new tab, or a new
+ * workspace. Exactly one must be selected. */
+export interface PaneMoveOptions {
+  paneId: string;
+  destination: "tab" | "new-tab" | "new-workspace";
+  tabId?: string;
+  workspaceId?: string;
+  split?: "right" | "down";
+  targetPaneId?: string;
+  ratio?: number;
+  label?: string;
+  tabLabel?: string;
+  focus?: boolean;
 }
 
 /** Real process runner - the only place that touches `Bun.spawn`. */
@@ -268,6 +363,55 @@ function mapPane(raw: unknown, argv: string[]): Pane {
   };
 }
 
+/** Maps one raw `worktree list` entry. Only `path` must be a string (the
+ * identity herdr addresses a worktree by); everything else degrades to a
+ * documented default so an unusual repo state never breaks the list. */
+function mapWorktree(raw: unknown, argv: string[]): Worktree {
+  if (!isRecord(raw) || typeof raw.path !== "string") {
+    throw new HerdrError(
+      "invalid_response",
+      `herdr ${argv.join(" ")}: expected a worktree object with a string path, got ${JSON.stringify(raw).slice(0, 200)}`,
+    );
+  }
+  return {
+    path: raw.path,
+    branch: typeof raw.branch === "string" ? raw.branch : "",
+    label: typeof raw.label === "string" ? raw.label : null,
+    isBare: raw.is_bare === true,
+    isDetached: raw.is_detached === true,
+    isLinkedWorktree: raw.is_linked_worktree === true,
+    isPrunable: raw.is_prunable === true,
+    // Present only on a worktree currently open in a workspace; absent (not
+    // null) otherwise, hence the "" default rather than a nullable field.
+    openWorkspaceId: typeof raw.open_workspace_id === "string" ? raw.open_workspace_id : "",
+  };
+}
+
+/** `--workspace ID` xor `--cwd PATH`; herdr rejects both together, so this
+ * prefers workspaceId and never emits the pair. */
+function scopeFlags(scope?: WorktreeScope): string[] {
+  if (scope?.workspaceId !== undefined) return ["--workspace", scope.workspaceId];
+  if (scope?.cwd !== undefined) return ["--cwd", scope.cwd];
+  return [];
+}
+
+/** herdr spells the focus choice as a flag pair, not a boolean value. */
+function focusFlags(focus?: boolean): string[] {
+  return focus === undefined ? [] : [focus ? "--focus" : "--no-focus"];
+}
+
+/** Repeats `--env KEY=VALUE` once per entry - herdr takes no comma list. */
+function envFlags(env?: string[]): string[] {
+  return (env ?? []).flatMap((pair) => ["--env", pair]);
+}
+
+/** A rename argument is either the new label or the `--clear` sentinel.
+ * Only `agent rename` and `pane rename` accept --clear; tab/workspace rename
+ * do not, which their call sites enforce by never passing null. */
+function renameArg(name: string | null): string {
+  return name === null ? "--clear" : name;
+}
+
 function agentReadFlags(opts?: AgentReadOptions): string[] {
   if (!opts) return [];
   const flags: string[] = [];
@@ -427,6 +571,243 @@ export function createHerdrClient(runner: HerdrRunner = bunHerdrRunner): HerdrCl
         throw new HerdrError("invalid_response", `herdr ${argv.join(" ")}: expected result.panes to be an array`);
       }
       return panes.map((raw) => mapPane(raw, argv));
+    },
+
+    async agentSend(target, text) {
+      await runHerdrVoid(runner, ["agent", "send", target, text]);
+    },
+
+    async agentFocus(target) {
+      await runHerdrVoid(runner, ["agent", "focus", target]);
+    },
+
+    async agentRename(target, name) {
+      await runHerdrVoid(runner, ["agent", "rename", target, renameArg(name)]);
+    },
+
+    async agentStart({ name, argv: command, cwd, workspaceId, tabId, split, env, focus }) {
+      await runHerdrVoid(runner, [
+        "agent",
+        "start",
+        name,
+        ...(cwd !== undefined ? ["--cwd", cwd] : []),
+        ...(workspaceId !== undefined ? ["--workspace", workspaceId] : []),
+        ...(tabId !== undefined ? ["--tab", tabId] : []),
+        ...(split !== undefined ? ["--split", split] : []),
+        ...envFlags(env),
+        ...focusFlags(focus),
+        // The `--` separator is mandatory: everything after it is the agent's
+        // own argv, which herdr must not parse as its own flags.
+        "--",
+        ...command,
+      ]);
+    },
+
+    async agentExplain(target) {
+      const argv = ["agent", "explain", target, "--json"];
+      const parsed = await runHerdr(runner, argv);
+      if (!isRecord(parsed)) {
+        throw new HerdrError(
+          "invalid_response",
+          `herdr ${argv.join(" ")}: expected a flat object, got ${JSON.stringify(parsed).slice(0, 200)}`,
+        );
+      }
+      return parsed;
+    },
+
+    async paneGet(paneId) {
+      const argv = ["pane", "get", paneId];
+      const parsed = await runHerdr(runner, argv);
+      return mapPane(unwrapResult(parsed, "pane", argv), argv);
+    },
+
+    async paneRename(paneId, name) {
+      await runHerdrVoid(runner, ["pane", "rename", paneId, renameArg(name)]);
+    },
+
+    async paneFocusDirection(direction, paneId) {
+      await runHerdrVoid(runner, [
+        "pane",
+        "focus",
+        "--direction",
+        direction,
+        ...(paneId !== undefined ? ["--pane", paneId] : ["--current"]),
+      ]);
+    },
+
+    async paneSplit({ direction, paneId, ratio, cwd, env, focus }) {
+      await runHerdrVoid(runner, [
+        "pane",
+        "split",
+        ...(paneId !== undefined ? ["--pane", paneId] : ["--current"]),
+        "--direction",
+        direction,
+        ...(ratio !== undefined ? ["--ratio", String(ratio)] : []),
+        ...(cwd !== undefined ? ["--cwd", cwd] : []),
+        ...envFlags(env),
+        ...focusFlags(focus),
+      ]);
+    },
+
+    async paneSwap({ sourcePaneId, targetPaneId, direction, paneId }) {
+      // Two mutually exclusive grammars. Building a hybrid argv would produce
+      // a herdr usage error at exit 2; failing here names the actual problem.
+      const hasPair = sourcePaneId !== undefined && targetPaneId !== undefined;
+      if (hasPair && direction !== undefined) {
+        throw new HerdrError(
+          "invalid_request",
+          "pane swap takes either a source/target pane pair or a direction, not both",
+        );
+      }
+      if (hasPair) {
+        await runHerdrVoid(runner, ["pane", "swap", "--source-pane", sourcePaneId, "--target-pane", targetPaneId]);
+        return;
+      }
+      if (direction === undefined) {
+        throw new HerdrError(
+          "invalid_request",
+          "pane swap needs either both sourcePaneId and targetPaneId, or a direction",
+        );
+      }
+      await runHerdrVoid(runner, [
+        "pane",
+        "swap",
+        "--direction",
+        direction,
+        ...(paneId !== undefined ? ["--pane", paneId] : ["--current"]),
+      ]);
+    },
+
+    async paneMove({ paneId, destination, tabId, workspaceId, split, targetPaneId, ratio, label, tabLabel, focus }) {
+      const head = ["pane", "move", paneId];
+      if (destination === "tab") {
+        if (tabId === undefined || split === undefined) {
+          throw new HerdrError("invalid_request", "pane move to an existing tab requires tabId and split");
+        }
+        await runHerdrVoid(runner, [
+          ...head,
+          "--tab",
+          tabId,
+          "--split",
+          split,
+          ...(targetPaneId !== undefined ? ["--target-pane", targetPaneId] : []),
+          ...(ratio !== undefined ? ["--ratio", String(ratio)] : []),
+          ...focusFlags(focus),
+        ]);
+        return;
+      }
+      if (destination === "new-tab") {
+        await runHerdrVoid(runner, [
+          ...head,
+          "--new-tab",
+          ...(workspaceId !== undefined ? ["--workspace", workspaceId] : []),
+          ...(label !== undefined ? ["--label", label] : []),
+          ...focusFlags(focus),
+        ]);
+        return;
+      }
+      await runHerdrVoid(runner, [
+        ...head,
+        "--new-workspace",
+        ...(label !== undefined ? ["--label", label] : []),
+        ...(tabLabel !== undefined ? ["--tab-label", tabLabel] : []),
+        ...focusFlags(focus),
+      ]);
+    },
+
+    async tabGet(tabId) {
+      const argv = ["tab", "get", tabId];
+      const parsed = await runHerdr(runner, argv);
+      return mapTab(unwrapResult(parsed, "tab", argv), argv);
+    },
+
+    async tabCreate({ workspaceId, cwd, label, focus }) {
+      const argv = [
+        "tab",
+        "create",
+        ...(workspaceId !== undefined ? ["--workspace", workspaceId] : []),
+        ...(cwd !== undefined ? ["--cwd", cwd] : []),
+        ...(label !== undefined ? ["--label", label] : []),
+        ...focusFlags(focus),
+      ];
+      const outcome = await spawnHerdr(runner, argv);
+      throwOnNonZeroExit(outcome, argv);
+      // Tolerant by design: `tab create`'s success envelope is unverified, so
+      // a well-shaped `result.tab` is mapped and anything else degrades to
+      // null rather than failing a create that actually succeeded.
+      const parsed = tryParseJson(outcome.stdout.trim());
+      if (!isRecord(parsed) || !isRecord(parsed.result) || !isRecord(parsed.result.tab)) return null;
+      return mapTab(parsed.result.tab, argv);
+    },
+
+    async tabRename(tabId, label) {
+      await runHerdrVoid(runner, ["tab", "rename", tabId, label]);
+    },
+
+    async tabFocus(tabId) {
+      await runHerdrVoid(runner, ["tab", "focus", tabId]);
+    },
+
+    async tabClose(tabId) {
+      await runHerdrVoid(runner, ["tab", "close", tabId]);
+    },
+
+    async workspaceGet(id) {
+      const argv = ["workspace", "get", id];
+      const parsed = await runHerdr(runner, argv);
+      const fields = mapWorkspaceFields(unwrapResult(parsed, "workspace", argv), argv);
+      // `workspace get` carries no cwd (verified live) - same first-pane
+      // inference workspaceList relies on.
+      return { ...fields, cwd: await firstPaneCwd(runner, fields.id) };
+    },
+
+    async workspaceRename(id, label) {
+      await runHerdrVoid(runner, ["workspace", "rename", id, label]);
+    },
+
+    async workspaceClose(id) {
+      await runHerdrVoid(runner, ["workspace", "close", id]);
+    },
+
+    async worktreeList(scope) {
+      const argv = ["worktree", "list", ...scopeFlags(scope), "--json"];
+      const parsed = await runHerdr(runner, argv);
+      const worktrees = unwrapResult(parsed, "worktrees", argv);
+      if (!Array.isArray(worktrees)) {
+        throw new HerdrError("invalid_response", `herdr ${argv.join(" ")}: expected result.worktrees to be an array`);
+      }
+      return worktrees.map((raw) => mapWorktree(raw, argv));
+    },
+
+    async worktreeCreate({ branch, base, path, label, focus, ...scope }) {
+      await runHerdrVoid(runner, [
+        "worktree",
+        "create",
+        ...scopeFlags(scope),
+        ...(branch !== undefined ? ["--branch", branch] : []),
+        ...(base !== undefined ? ["--base", base] : []),
+        ...(path !== undefined ? ["--path", path] : []),
+        ...(label !== undefined ? ["--label", label] : []),
+        ...focusFlags(focus),
+      ]);
+    },
+
+    async worktreeOpen({ path, branch, label, focus, ...scope }) {
+      if (path === undefined && branch === undefined) {
+        throw new HerdrError("invalid_request", "worktree open requires either path or branch");
+      }
+      await runHerdrVoid(runner, [
+        "worktree",
+        "open",
+        ...scopeFlags(scope),
+        ...(path !== undefined ? ["--path", path] : ["--branch", branch as string]),
+        ...(label !== undefined ? ["--label", label] : []),
+        ...focusFlags(focus),
+      ]);
+    },
+
+    async worktreeRemove(workspaceId, force) {
+      await runHerdrVoid(runner, ["worktree", "remove", "--workspace", workspaceId, ...(force ? ["--force"] : [])]);
     },
   };
 }

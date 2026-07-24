@@ -10,6 +10,7 @@ import { join } from "node:path";
 import {
   createNecromancy,
   deriveSlug,
+  NecromancyError,
   type NecromancyOptions,
 } from "../../src/necromancy/core.js";
 import { createHerdrClient, type HerdrClient, type HerdrRunner } from "../../src/herdr/client.js";
@@ -53,7 +54,7 @@ function stubClient(overrides: Partial<HerdrClient> = {}): HerdrClient {
     tabList: unexpected("tabList"),
     paneList: unexpected("paneList"),
     ...overrides,
-  } as HerdrClient;
+  } as unknown as HerdrClient;
 }
 
 /** Every method records its name and throws - for zero-herdr-call assertions. */
@@ -423,6 +424,169 @@ describe("necromancy core (fixture FS + stub client)", () => {
 
       expect(sessions[0]!.handle).toBeUndefined();
       expect(sessions[0]!.current).toBeUndefined();
+    });
+  });
+
+  // searchAllSessions is the "I know WHAT happened, not WHERE" path: it never
+  // takes a space to start from, so these fixtures deliberately hide the match
+  // in a space the caller would not have guessed.
+  describe("searchAllSessions - cross-session content search", () => {
+    /** A session whose user turns carry `texts`, each line also carrying the cwd. */
+    function searchSession(cwd: string, ...texts: string[]): string {
+      return texts.map((text) => jl({ type: "user", message: { content: text }, cwd })).join("");
+    }
+
+    it("finds the match in a space the caller never guessed, without touching herdr", async () => {
+      const noisy = "/tmp/proj-noisy";
+      const quiet = "/tmp/proj-quiet";
+      await writeSession(await makeSpace(noisy), U1, searchSession(noisy, "unrelated chatter"), new Date("2026-07-09T00:00:00Z"));
+      await writeSession(await makeSpace(quiet), U2, searchSession(quiet, "fixed the flaky login test"), new Date("2026-07-01T00:00:00Z"));
+
+      const { client, calls } = trackingClient();
+      const result = await necromancy({ client }).searchAllSessions({ query: "FLAKY login" });
+
+      expect(result.sessions).toHaveLength(1);
+      expect(result.sessions[0]).toMatchObject({
+        cwd: quiet, // recovered from the session's own cwd line, not the slug
+        sessionId: U2,
+        matchCount: 1,
+        index: 0,
+        role: "user",
+        mtime: new Date("2026-07-01T00:00:00Z").getTime(),
+        messageCount: 1,
+      });
+      expect(result.sessions[0]!.snippet).toContain("flaky login test");
+      expect(result).toMatchObject({ total: 1, truncated: false, scanned: 2, scanTruncated: false });
+      expect(calls).toEqual([]); // pure disk read: a herdr outage can't hide a hit
+    });
+
+    it("scans every space by default, newest-activity first, and only one space when given", async () => {
+      const cwdA = "/tmp/proj-a";
+      const cwdB = "/tmp/proj-b";
+      await writeSession(await makeSpace(cwdA), U1, searchSession(cwdA, "the release blocker"), new Date("2026-07-02T00:00:00Z"));
+      await writeSession(await makeSpace(cwdB), U2, searchSession(cwdB, "another release blocker"), new Date("2026-07-08T00:00:00Z"));
+
+      const core = necromancy({ client: stubClient() });
+      const all = await core.searchAllSessions({ query: "release blocker" });
+      expect(all.sessions.map((s) => s.cwd)).toEqual([cwdB, cwdA]); // newest first
+      expect(all.total).toBe(2);
+
+      const scoped = await core.searchAllSessions({ query: "release blocker", space: cwdA });
+      expect(scoped.sessions.map((s) => s.sessionId)).toEqual([U1]);
+      expect(scoped.scanned).toBe(1); // the other space is never read at all
+    });
+
+    it("collapses every match inside one session into a single entry carrying matchCount", async () => {
+      const cwd = "/tmp/proj-a";
+      const dir = await makeSpace(cwd);
+      await writeSession(dir, U1, searchSession(cwd, "deploy failed", "retrying the deploy", "deploy is green"));
+
+      const { sessions, total } = await necromancy({ client: stubClient() }).searchAllSessions({ query: "deploy" });
+
+      expect(total).toBe(1);
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0]!.matchCount).toBe(3);
+      expect(sessions[0]!.index).toBe(0); // only the FIRST match is rendered
+      expect(sessions[0]!.snippet).toContain("deploy failed");
+      expect(sessions[0]!.messageCount).toBe(3);
+    });
+
+    it("caps the response with limit and reports total and truncated", async () => {
+      const cwdOld = "/tmp/proj-old";
+      const cwdMid = "/tmp/proj-mid";
+      const cwdNew = "/tmp/proj-new";
+      await writeSession(await makeSpace(cwdOld), U1, searchSession(cwdOld, "widget bug"), new Date("2026-07-01T00:00:00Z"));
+      await writeSession(await makeSpace(cwdMid), U2, searchSession(cwdMid, "widget bug"), new Date("2026-07-05T00:00:00Z"));
+      await writeSession(await makeSpace(cwdNew), U3, searchSession(cwdNew, "widget bug"), new Date("2026-07-09T00:00:00Z"));
+
+      const result = await necromancy({ client: stubClient() }).searchAllSessions({ query: "widget", limit: 2 });
+
+      expect(result.total).toBe(3);
+      expect(result.truncated).toBe(true);
+      expect(result.sessions.map((s) => s.cwd)).toEqual([cwdNew, cwdMid]);
+      expect(result.scanTruncated).toBe(false); // every candidate was still scanned
+    });
+
+    it("stops at maxSessions and reports the partial scan instead of a silent miss", async () => {
+      // The match lives in the OLDEST session, which a 2-file budget never
+      // reaches: the caller must see scanTruncated, not an empty "not found".
+      const cwdOld = "/tmp/proj-old";
+      const cwdMid = "/tmp/proj-mid";
+      const cwdNew = "/tmp/proj-new";
+      await writeSession(await makeSpace(cwdOld), U1, searchSession(cwdOld, "the buried needle"), new Date("2026-07-01T00:00:00Z"));
+      await writeSession(await makeSpace(cwdMid), U2, searchSession(cwdMid, "nothing here"), new Date("2026-07-05T00:00:00Z"));
+      await writeSession(await makeSpace(cwdNew), U3, searchSession(cwdNew, "nothing here either"), new Date("2026-07-09T00:00:00Z"));
+
+      const result = await necromancy({ client: stubClient() }).searchAllSessions({ query: "needle", maxSessions: 2 });
+
+      expect(result.sessions).toEqual([]);
+      expect(result.scanned).toBe(2);
+      expect(result.scanTruncated).toBe(true);
+      expect(result.total).toBe(0);
+    });
+
+    it("spends no scan budget on empty, oversized, or malformed session files", async () => {
+      // The two skippable files are the NEWEST, so a budget of 2 would be gone
+      // before the needle if the stat gate cost anything.
+      const cwd = "/tmp/proj-a";
+      const dir = await makeSpace(cwd);
+      await writeSession(dir, U1, "", new Date("2026-07-09T00:00:00Z")); // empty: stat-gated, never read
+      await writeSession(dir, U2, jl({ type: "user", message: { content: "x".repeat(500) }, cwd }), new Date("2026-07-08T00:00:00Z")); // oversized
+      const malformed = join(dir, "44444444-4444-4444-4444-444444444444.jsonl");
+      await writeFile(malformed, "not json\n{broken");
+      await utimes(malformed, new Date("2026-07-07T00:00:00Z"), new Date("2026-07-07T00:00:00Z"));
+      await writeSession(dir, U3, searchSession(cwd, "the needle"), new Date("2026-07-01T00:00:00Z"));
+
+      const core = necromancy({ maxSessionBytes: 200, client: stubClient() });
+      const result = await core.searchAllSessions({ query: "needle", maxSessions: 2 });
+
+      // Budget spent only on the two files actually read (malformed + needle);
+      // nothing was left unvisited, so the scan ran to completion.
+      expect(result.sessions.map((s) => s.sessionId)).toEqual([U3]);
+      expect(result.scanned).toBe(2);
+      expect(result.scanTruncated).toBe(false);
+    });
+
+    it("matches a regex pattern when regex is true", async () => {
+      const cwd = "/tmp/proj-a";
+      const dir = await makeSpace(cwd);
+      await writeSession(dir, U1, searchSession(cwd, "cut the release at v1.12.3 today"), new Date("2026-07-08T00:00:00Z"));
+      await writeSession(dir, U2, searchSession(cwd, "no version here"), new Date("2026-07-01T00:00:00Z"));
+
+      const result = await necromancy({ client: stubClient() }).searchAllSessions({
+        query: "v\\d+\\.\\d+\\.\\d+",
+        regex: true,
+      });
+
+      expect(result.sessions.map((s) => s.sessionId)).toEqual([U1]);
+      expect(result.sessions[0]!.snippet).toContain("v1.12.3");
+    });
+
+    it("rejects an invalid regex with a typed error instead of silently searching for it literally", async () => {
+      const cwd = "/tmp/proj-a";
+      await writeSession(await makeSpace(cwd), U1, searchSession(cwd, "a [unclosed bracket"));
+
+      const core = necromancy({ client: stubClient() });
+      const error = await core.searchAllSessions({ query: "[unclosed", regex: true }).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(NecromancyError);
+      expect((error as NecromancyError).code).toBe("invalid_regex");
+
+      // The same query without regex:true is a plain substring, not an error.
+      const literal = await core.searchAllSessions({ query: "[unclosed" });
+      expect(literal.sessions.map((s) => s.sessionId)).toEqual([U1]);
+    });
+
+    it("returns empty without crashing when there is no graveyard at all", async () => {
+      const core = createNecromancy({ projectsRoot: join(root, "does-not-exist"), client: stubClient() });
+
+      expect(await core.searchAllSessions({ query: "anything" })).toEqual({
+        sessions: [],
+        total: 0,
+        truncated: false,
+        scanned: 0,
+        scanTruncated: false,
+      });
     });
   });
 

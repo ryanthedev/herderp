@@ -78,6 +78,9 @@ export interface AgentReadOptions {
   ansi?: boolean;
 }
 
+/** `agent wait --status` accepts only these four - NOT "done", which appears
+ * in AgentStatus (a reported value) but is not waitable (verified against
+ * `herdr agent wait --help`). Keep the two unions separate for that reason. */
 export interface AgentWaitOptions {
   status: "idle" | "working" | "blocked" | "unknown";
   timeoutMs?: number;
@@ -85,6 +88,69 @@ export interface AgentWaitOptions {
 
 export interface WorkspaceCreateOptions {
   cwd: string;
+  label?: string;
+  focus?: boolean;
+}
+
+/** Shared by `tab create` and `workspace create` - same flag set on both. */
+export interface TabCreateOptions {
+  workspaceId?: string;
+  cwd?: string;
+  label?: string;
+  focus?: boolean;
+}
+
+/** `agent start <name> [flags] -- <argv...>`. `name` is the agent label herdr
+ * registers; `argv` is the command line after the `--` separator. */
+export interface AgentStartOptions {
+  name: string;
+  argv: string[];
+  cwd?: string;
+  workspaceId?: string;
+  tabId?: string;
+  split?: "right" | "down";
+  env?: string[];
+  focus?: boolean;
+}
+
+/**
+ * One entry from `herdr worktree list`. Field names mirror the verified JSON
+ * (`branch`, `path`, `label`, `is_*` flags, and `open_workspace_id` which is
+ * present ONLY on a worktree currently open in a workspace - absent, not
+ * null, otherwise).
+ */
+export interface Worktree {
+  path: string;
+  branch: string;
+  label: string | null;
+  isBare: boolean;
+  isDetached: boolean;
+  isLinkedWorktree: boolean;
+  isPrunable: boolean;
+  /** Empty string when the worktree is not open in any workspace. */
+  openWorkspaceId: string;
+}
+
+/** Scope for the worktree subcommands: herdr accepts `--workspace ID` OR
+ * `--cwd PATH`, never both. Bare (neither) resolves against herdr's FOCUSED
+ * workspace - not the caller's $HERDR_WORKSPACE_ID (verified live), which is
+ * why callers should pass one explicitly. */
+export interface WorktreeScope {
+  workspaceId?: string;
+  cwd?: string;
+}
+
+export interface WorktreeCreateOptions extends WorktreeScope {
+  branch?: string;
+  base?: string;
+  path?: string;
+  label?: string;
+  focus?: boolean;
+}
+
+export interface WorktreeOpenOptions extends WorktreeScope {
+  path?: string;
+  branch?: string;
   label?: string;
   focus?: boolean;
 }

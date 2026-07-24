@@ -135,7 +135,7 @@ function stubClient(): HerdrClient {
     sessionList: unexpected("sessionList"),
     tabList: unexpected("tabList"),
     paneList: unexpected("paneList"),
-  } as HerdrClient;
+  } as unknown as HerdrClient;
 }
 
 describe("necromancy_anchors tool integration (real core, real registry)", () => {

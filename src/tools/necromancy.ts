@@ -61,7 +61,7 @@ export function registerNecromancyTools(server: McpServer, necromancy: Necromanc
       "for this the moment the user knows what happened but not where (\"that session where we fixed the flaky " +
       "login test\", no cwd and no session id). This is the entry point: use it INSTEAD of guessing a space with " +
       "necromancy_find_spaces and then hunting session by session with necromancy_search. Scans every space in the " +
-      "graveyard by default; pass space (a cwd) to scan just one. Returns ONE entry per matching session - " +
+      "graveyard by default; pass cwd (a space's cwd) to scan just one. Returns ONE entry per matching session - " +
       "{cwd, sessionId, matchCount, the first match's index/role/tool + a bounded snippet, mtime, messageCount} - " +
       "newest-activity first; matchCount is how many turns matched INSIDE that session, so a big number means look " +
       "there, not that you were given that many results. regex:true switches the query from case-insensitive " +
@@ -70,18 +70,18 @@ export function registerNecromancyTools(server: McpServer, necromancy: Necromanc
       `(max ${DEFAULT_MAX_SESSION_HITS}) - narrow the query; scanTruncated:true means the scan stopped after ` +
       `maxSessions files (max ${DEFAULT_MAX_SCANNED_SESSIONS}, newest first - scanned says how many were read), so ` +
       "everything older was never looked at and a thin result is NOT proof the query isn't there - say so, and " +
-      "narrow with space rather than implying the search was exhaustive. Next: take a hit's cwd+sessionId into " +
+      "narrow with cwd rather than implying the search was exhaustive. Next: take a hit's cwd+sessionId into " +
       "necromancy_anchors/necromancy_outline, its index straight into necromancy_read, or necromancy_search on " +
       "that one session for every match inside it.",
     inputSchema: {
       query: z.string(),
-      space: z.string().optional(),
+      cwd: z.string().optional(),
       limit: z.number().int().min(1).max(DEFAULT_MAX_SESSION_HITS).optional(),
       regex: z.boolean().optional(),
       maxSessions: z.number().int().min(1).max(DEFAULT_MAX_SCANNED_SESSIONS).optional(),
     },
-    handler: async ({ query, space, limit, regex, maxSessions }) =>
-      ({ ...(await necromancy.searchAllSessions({ query, space, limit, regex, maxSessions })) }) as Record<
+    handler: async ({ query, cwd, limit, regex, maxSessions }) =>
+      ({ ...(await necromancy.searchAllSessions({ query, cwd, limit, regex, maxSessions })) }) as Record<
         string,
         unknown
       >,
@@ -90,15 +90,17 @@ export function registerNecromancyTools(server: McpServer, necromancy: Necromanc
   registerTool(server, {
     name: "necromancy_list_sessions",
     description:
-      "Lists Claude Code sessions for one space (its cwd), newest first, with a one-line preview and message count " +
-      "for each. Live sessions are marked and carry their herdr handle (`<workspace-label>:<tab-label>`, e.g. " +
-      "upublish:1) so you can see which live agent each session is. Pass currentSessionId (the running session's " +
-      "own id, from $CLAUDE_CODE_SESSION_ID) to flag `current:true` on the session you're in - never read it as a " +
-      "target. Returns degraded:true when herdr was unreachable: the on-disk sessions still come back (live all " +
-      "false, no handles) - say live status is unknown rather than implying nothing is running.",
-    inputSchema: { space: z.string(), currentSessionId: z.string().optional() },
-    handler: async ({ space, currentSessionId }) =>
-      ({ ...(await necromancy.listSessions(space, { currentSessionId })) }) as Record<string, unknown>,
+      "Lists Claude Code sessions for one space, identified by its cwd, newest first, with a one-line preview and " +
+      "message count for each. Each row's session id comes back as `sessionId` - feed it straight into the reading " +
+      "tools (necromancy_anchors/outline/search/read all take `sessionId`). Live sessions are marked and carry " +
+      "their herdr handle (`<workspace-label>:<tab-label>`, e.g. upublish:1) so you can see which live agent each " +
+      "session is. Pass currentSessionId (the running session's own id, from $CLAUDE_CODE_SESSION_ID) to flag " +
+      "`current:true` on the session you're in - never read it as a target. Returns degraded:true when herdr was " +
+      "unreachable: the on-disk sessions still come back (live all false, no handles) - say live status is unknown " +
+      "rather than implying nothing is running.",
+    inputSchema: { cwd: z.string(), currentSessionId: z.string().optional() },
+    handler: async ({ cwd, currentSessionId }) =>
+      ({ ...(await necromancy.listSessions(cwd, { currentSessionId })) }) as Record<string, unknown>,
   });
 
   registerTool(server, {

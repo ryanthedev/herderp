@@ -25,7 +25,7 @@ import { DEFAULT_MAX_OUTLINE_ENTRIES, DEFAULT_MAX_READ_BYTES, DEFAULT_MAX_SEARCH
 import type { HerdrClient } from "../../src/herdr/client.js";
 
 const STUB_SPACE: SpaceInfo = { cwd: "/tmp/proj", label: "alpha", workspaceId: "w1", sessionCount: 2, lastActivity: 1720000000000 };
-const STUB_SESSION: SessionInfo = { id: "11111111-1111-1111-1111-111111111111", cwd: "/tmp/proj", mtime: 1720000000000, live: false, preview: "fixing things", messageCount: 4 };
+const STUB_SESSION: SessionInfo = { sessionId: "11111111-1111-1111-1111-111111111111", cwd: "/tmp/proj", mtime: 1720000000000, live: false, preview: "fixing things", messageCount: 4 };
 
 /** Phase 1 (necromancy core) added sessionOutline/sessionSearch/sessionRead
  * to the Necromancy factory type; the find_spaces/list_sessions tests here
@@ -111,7 +111,7 @@ describe("registerNecromancyTools - DW-3.6", () => {
       }),
     );
 
-    const result = await registeredTools(server).necromancy_list_sessions!.handler({ space: "/tmp/proj" }, {});
+    const result = await registeredTools(server).necromancy_list_sessions!.handler({ cwd: "/tmp/proj" }, {});
 
     expect(received).toBe("/tmp/proj");
     expect(JSON.parse(result.content[0]!.text)).toEqual({ sessions: [STUB_SESSION], degraded: false });
@@ -123,7 +123,7 @@ describe("registerNecromancyTools - DW-3.6", () => {
       sessions: [
         {
           cwd: "/tmp/proj",
-          sessionId: STUB_SESSION.id,
+          sessionId: STUB_SESSION.sessionId,
           matchCount: 3,
           index: 7,
           role: "text" as const,
@@ -149,11 +149,11 @@ describe("registerNecromancyTools - DW-3.6", () => {
     );
 
     const result = await registeredTools(server).necromancy_search_all!.handler(
-      { query: "flaky login", space: "/tmp/proj", limit: 5, regex: false, maxSessions: 10 },
+      { query: "flaky login", cwd: "/tmp/proj", limit: 5, regex: false, maxSessions: 10 },
       {},
     );
 
-    expect(received).toEqual({ query: "flaky login", space: "/tmp/proj", limit: 5, regex: false, maxSessions: 10 });
+    expect(received).toEqual({ query: "flaky login", cwd: "/tmp/proj", limit: 5, regex: false, maxSessions: 10 });
     expect(JSON.parse(result.content[0]!.text)).toEqual(found);
   });
 
@@ -258,11 +258,11 @@ describe("registerNecromancyTools reader tools - DW-2.1", () => {
     );
 
     const result = await registeredTools(server).necromancy_outline!.handler(
-      { sessionId: STUB_SESSION.id, cwd: "/tmp/proj", offset: 5, limit: 10, filter: "tool_use" },
+      { sessionId: STUB_SESSION.sessionId, cwd: "/tmp/proj", offset: 5, limit: 10, filter: "tool_use" },
       {},
     );
 
-    expect(received).toEqual({ sessionId: STUB_SESSION.id, cwd: "/tmp/proj", offset: 5, limit: 10, filter: "tool_use" });
+    expect(received).toEqual({ sessionId: STUB_SESSION.sessionId, cwd: "/tmp/proj", offset: 5, limit: 10, filter: "tool_use" });
     expect(JSON.parse(result.content[0]!.text)).toEqual(STUB_OUTLINE);
   });
 
@@ -280,11 +280,11 @@ describe("registerNecromancyTools reader tools - DW-2.1", () => {
     );
 
     const result = await registeredTools(server).necromancy_search!.handler(
-      { sessionId: STUB_SESSION.id, cwd: "/tmp/proj", query: "hi", limit: 5, regex: false },
+      { sessionId: STUB_SESSION.sessionId, cwd: "/tmp/proj", query: "hi", limit: 5, regex: false },
       {},
     );
 
-    expect(received).toEqual({ sessionId: STUB_SESSION.id, cwd: "/tmp/proj", query: "hi", limit: 5, regex: false });
+    expect(received).toEqual({ sessionId: STUB_SESSION.sessionId, cwd: "/tmp/proj", query: "hi", limit: 5, regex: false });
     expect(JSON.parse(result.content[0]!.text)).toEqual(STUB_SEARCH);
   });
 
@@ -302,11 +302,11 @@ describe("registerNecromancyTools reader tools - DW-2.1", () => {
     );
 
     const result = await registeredTools(server).necromancy_read!.handler(
-      { sessionId: STUB_SESSION.id, cwd: "/tmp/proj", from: 0, to: 2, maxBytes: 1024 },
+      { sessionId: STUB_SESSION.sessionId, cwd: "/tmp/proj", from: 0, to: 2, maxBytes: 1024 },
       {},
     );
 
-    expect(received).toEqual({ sessionId: STUB_SESSION.id, cwd: "/tmp/proj", from: 0, to: 2, maxBytes: 1024 });
+    expect(received).toEqual({ sessionId: STUB_SESSION.sessionId, cwd: "/tmp/proj", from: 0, to: 2, maxBytes: 1024 });
     expect(JSON.parse(result.content[0]!.text)).toEqual(STUB_READ);
   });
 

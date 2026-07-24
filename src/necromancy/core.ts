@@ -124,8 +124,10 @@ export interface FindSpacesResult {
 export interface SearchAllSessionsOptions {
   /** Case-insensitive substring over turn text, or a regex when `regex` is set. */
   query: string;
-  /** One space's cwd to scan. Omitted: every space in the graveyard. */
-  space?: string;
+  /** One space's cwd to confine the scan to. Omitted: every space in the
+   * graveyard. Named `cwd` to match every other tool's space argument (the
+   * value is the same one `find_spaces` returns as `cwd`). */
+  cwd?: string;
   /** Max matching sessions returned (newest-activity first). Defaults to the configured maxSessionHits. */
   limit?: number;
   regex?: boolean;
@@ -167,7 +169,11 @@ export interface SearchAllSessionsResult {
 }
 
 export interface SessionInfo {
-  id: string;
+  /** The Claude Code session id (a UUID). Named `sessionId`, not `id`, so it
+   * feeds straight into the reading tools' `sessionId` param without a
+   * silent rename - the model joins these across tool calls, so one name
+   * across the whole surface matters more than local brevity. */
+  sessionId: string;
   cwd: string;
   mtime: number;
   live: boolean;
@@ -508,7 +514,7 @@ export function createNecromancy(options: NecromancyOptions) {
       if (!parsed) continue; // malformed jsonl: skip, never crash
       const handle = handleBySession.get(file.id);
       sessions.push({
-        id: file.id,
+        sessionId: file.id,
         cwd,
         mtime: file.mtimeMs,
         live: liveIds.has(file.id),
@@ -566,7 +572,7 @@ export function createNecromancy(options: NecromancyOptions) {
    *     read nor a slot in the budget.
    */
   async function searchAllSessions(options: SearchAllSessionsOptions): Promise<SearchAllSessionsResult> {
-    const { query, space, limit = maxSessionHits, regex = false, maxSessions = maxScannedSessions } = options;
+    const { query, cwd: scopeCwd, limit = maxSessionHits, regex = false, maxSessions = maxScannedSessions } = options;
 
     // searchTurns treats an invalid pattern as a literal substring; a scan of
     // hundreds of files must not silently answer a different question than the
@@ -579,12 +585,12 @@ export function createNecromancy(options: NecromancyOptions) {
     // read) and only for spaces that produced a hit. Degrades to the raw slug
     // like findSpaces does when no line carries a cwd.
     const cwdBySlug = new Map<string, string>();
-    if (space !== undefined) cwdBySlug.set(deriveSlug(space), space);
+    if (scopeCwd !== undefined) cwdBySlug.set(deriveSlug(scopeCwd), scopeCwd);
 
     const hits: SessionSearchHit[] = [];
     let scanned = 0;
     let scanTruncated = false;
-    for (const { file, slug } of await candidateSessions(space)) {
+    for (const { file, slug } of await candidateSessions(scopeCwd)) {
       if (scanned >= maxSessions) {
         scanTruncated = true; // candidates remain: say so, never truncate silently
         break;

@@ -7,7 +7,9 @@
 // Every failure path - a herdr binary that never starts, a nonzero exit
 // (JSON-shaped or plain-text), stdout that isn't parseable JSON, or a timed-
 // out `agent wait` - normalizes to a HerdrError. No method ever throws a raw
-// string or lets a herdr stdout blob escape uninterpreted.
+// string or lets a herdr stdout blob escape uninterpreted. The single
+// deliberate exception is `agentRead`, whose payload IS raw terminal text and
+// which herdr never wraps in JSON - see `runHerdrRaw`.
 
 import type {
   Agent,
@@ -44,6 +46,8 @@ export type HerdrRunner = (argv: string[]) => Promise<HerdrRunResult>;
 export interface HerdrClient {
   agentList(): Promise<Agent[]>;
   agentGet(target: string): Promise<Agent>;
+  /** Returns the pane's terminal snapshot verbatim. Alone among the read
+   * methods this one gets no JSON envelope from herdr - see `runHerdrRaw`. */
   agentRead(target: string, opts?: AgentReadOptions): Promise<string>;
   agentWait(target: string, opts: AgentWaitOptions): Promise<Agent>;
   workspaceList(): Promise<Workspace[]>;
@@ -257,6 +261,27 @@ async function runHerdrVoid(runner: HerdrRunner, argv: string[]): Promise<void> 
   throwOnNonZeroExit(outcome, argv);
 }
 
+/**
+ * Like `runHerdr` but for the one subcommand whose SUCCESS output is not
+ * JSON: `herdr agent read` prints the pane's terminal snapshot itself -
+ * box-drawing characters, and ANSI escapes under `--format ansi` (verified
+ * live against herdr 0.7.5, whose `--format` takes only `text`/`ansi`, and
+ * which has no `--json` flag on the command or globally). Routing it through
+ * `runHerdr` made every read fail with `invalid_response`.
+ *
+ * Only the parse step is dropped; failure handling is unchanged, because
+ * herdr's FAILURE output here IS the usual envelope - `agent read` on a
+ * missing target exits 1 with `{"error":{"code":"agent_not_found",...}}`
+ * (verified live), which `throwOnNonZeroExit` still turns into that exact
+ * code. Stdout is returned verbatim: a snapshot's leading indentation and
+ * trailing blank lines are content, so trimming would corrupt it.
+ */
+async function runHerdrRaw(runner: HerdrRunner, argv: string[]): Promise<string> {
+  const outcome = await spawnHerdr(runner, argv);
+  throwOnNonZeroExit(outcome, argv);
+  return outcome.stdout;
+}
+
 /** Reads `.result.<key>` out of the `{id,result:{...}}` envelope used by
  * agent/workspace/pane subcommands, validating the key is present. */
 function unwrapResult(parsed: unknown, key: string, argv: string[]): unknown {
@@ -446,13 +471,7 @@ export function createHerdrClient(runner: HerdrRunner = bunHerdrRunner): HerdrCl
     },
 
     async agentRead(target, opts) {
-      const argv = ["agent", "read", target, ...agentReadFlags(opts)];
-      const parsed = await runHerdr(runner, argv);
-      const read = unwrapResult(parsed, "read", argv);
-      if (!isRecord(read) || typeof read.text !== "string") {
-        throw new HerdrError("invalid_response", `herdr ${argv.join(" ")}: expected result.read.text to be a string`);
-      }
-      return read.text;
+      return runHerdrRaw(runner, ["agent", "read", target, ...agentReadFlags(opts)]);
     },
 
     async agentWait(target, { status, timeoutMs }) {

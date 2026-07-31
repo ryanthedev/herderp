@@ -78,21 +78,34 @@ describe("HerdrClient - DW-2.1 parse-success per method", () => {
     expect(agent).toEqual(MAPPED_AGENT);
   });
 
-  it("DW_2_1_agentRead_spawns_agent_read_with_flags_and_returns_text", async () => {
-    const { runner, calls } = stubRunner([
-      ok(
-        JSON.stringify({
-          id: "cli:agent:read",
-          result: { read: { format: "text", pane_id: "w3:p1", revision: 0, source: "recent", tab_id: "w3:t1", text: "hello\n", truncated: false, workspace_id: "w3" }, type: "pane_read" },
-        }),
-      ),
-    ]);
+  // `agent read` is the one subcommand with no JSON envelope: stdout IS the
+  // terminal snapshot. The stub below is a verbatim capture of
+  // `herdr agent read <target> --lines 5` against herdr 0.7.5 (box-drawing
+  // rule, prompt line, status line, trailing newline), not a JSON body.
+  const RAW_SNAPSHOT =
+    "────────────────────────────\n" +
+    "❯ ok, we need to add a headless claude adapter.\n" +
+    "────────────────────────────\n" +
+    "   18:34 ·  Opus ·  5 ·  (1M context)       high%\n" +
+    "  -- INSERT -- ⏸ manual mode on\n";
+
+  it("DW_2_1_agentRead_spawns_agent_read_with_flags_and_returns_raw_stdout", async () => {
+    const { runner, calls } = stubRunner([ok(RAW_SNAPSHOT)]);
     const client = createHerdrClient(runner);
 
     const text = await client.agentRead("w3:p1", { lines: 3, source: "recent" });
 
     expect(calls).toEqual([["agent", "read", "w3:p1", "--source", "recent", "--lines", "3"]]);
-    expect(text).toBe("hello\n");
+    expect(text).toBe(RAW_SNAPSHOT);
+  });
+
+  it("DW_2_1_agentRead_returns_the_snapshot_verbatim_without_trimming", async () => {
+    const { runner } = stubRunner([ok("  indented\n\n")]);
+    const client = createHerdrClient(runner);
+
+    // Leading indentation and trailing blank lines are pane content, not
+    // formatting noise - the raw path must not trim them away.
+    expect(await client.agentRead("w3:p1")).toBe("  indented\n\n");
   });
 
   it("DW_2_1_agentWait_spawns_agent_wait_with_status_and_timeout_and_maps_result", async () => {
@@ -437,6 +450,74 @@ describe("HerdrClient - DW-2.2/DW-2.4 error normalization (stubbed spawn, no liv
     expect((err as HerdrError).code).toBe("invalid_response");
   });
 
+  it("DW_2_2_agentRead_raw_path_still_normalizes_a_nonzero_exit_to_HerdrError_command_failed", async () => {
+    // Verified live against herdr 0.7.5: `herdr agent read wZZ:pZZ --lines 5`
+    // exits 1 with EMPTY stdout and this envelope on STDERR. Because
+    // throwOnNonZeroExit only looks for the envelope on stdout, that lands as
+    // command_failed carrying the envelope text - not as `agent_not_found`.
+    // That stream mismatch is pre-existing and repo-wide (`agent get` behaves
+    // identically), so it is out of scope here; this test pins what the raw
+    // path ACTUALLY does rather than what the envelope suggests it should.
+    const envelope = JSON.stringify({ error: { code: "agent_not_found", message: "agent target wZZ:pZZ not found" }, id: "cli:agent:read" });
+    const { runner, calls } = stubRunner([fail(1, { stderr: `${envelope}\n` })]);
+    const client = createHerdrClient(runner);
+
+    const err = await client.agentRead("wZZ:pZZ", { lines: 5 }).catch((e: unknown) => e);
+
+    expect(calls).toEqual([["agent", "read", "wZZ:pZZ", "--lines", "5"]]);
+    expect(err).toBeInstanceOf(HerdrError);
+    expect((err as HerdrError).code).toBe("command_failed");
+    expect((err as HerdrError).message).toContain("agent target wZZ:pZZ not found");
+  });
+
+  it("DW_2_2_agentRead_raw_path_keeps_herdrs_own_code_when_the_envelope_is_on_stdout", async () => {
+    // Guards the taxonomy itself: if herdr ever moves the envelope to stdout,
+    // the raw path must still surface herdr's code verbatim, exactly as the
+    // JSON path does.
+    const { runner } = stubRunner([
+      fail(1, { stdout: JSON.stringify({ error: { code: "agent_not_found", message: "agent target wZZ:pZZ not found" }, id: "cli:agent:read" }) }),
+    ]);
+    const client = createHerdrClient(runner);
+
+    const err = await client.agentRead("wZZ:pZZ").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HerdrError);
+    expect((err as HerdrError).code).toBe("agent_not_found");
+    expect((err as HerdrError).message).toBe("agent target wZZ:pZZ not found");
+  });
+
+  it("DW_2_2_agentRead_raw_path_still_normalizes_a_plain_text_failure_to_command_failed", async () => {
+    const { runner } = stubRunner([fail(2, { stderr: "usage: herdr agent read <TARGET>\n" })]);
+    const client = createHerdrClient(runner);
+
+    const err = await client.agentRead("w3:p1").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HerdrError);
+    expect((err as HerdrError).code).toBe("command_failed");
+    expect((err as HerdrError).message).toContain("usage: herdr agent read");
+  });
+
+  it("DW_2_2_agentRead_raw_path_normalizes_a_spawn_failure_to_spawn_failed", async () => {
+    const runner: HerdrRunner = async () => {
+      throw new Error("spawn herdr ENOENT");
+    };
+    const client = createHerdrClient(runner);
+
+    const err = await client.agentRead("w3:p1").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HerdrError);
+    expect((err as HerdrError).code).toBe("spawn_failed");
+  });
+
+  it("DW_2_2_agentRead_empty_stdout_on_exit_0_is_an_empty_pane_not_an_invalid_response", async () => {
+    // Unlike every JSON-returning method, empty stdout here is a legitimate
+    // answer (nothing on screen) - it must not become invalid_response.
+    const { runner } = stubRunner([ok("")]);
+    const client = createHerdrClient(runner);
+
+    expect(await client.agentRead("w3:p1")).toBe("");
+  });
+
   it("DW_2_2_agentWait_timeout_normalizes_to_HerdrError_wait_timeout_not_command_failed", async () => {
     // Verified live: `herdr agent wait ... --timeout 200` on an agent whose
     // status never changes -> exit 1, plain text "timed out waiting for
@@ -565,18 +646,12 @@ describe("HerdrClient - coverage completion for defensive guards (review fix pas
     expect((err as HerdrError).message).toContain("expected result.agents to be an array");
   });
 
-  it("agentRead throws invalid_response when result.read.text is present but not a string", async () => {
-    const { runner } = stubRunner([
-      ok(JSON.stringify({ id: "cli:agent:read", result: { read: { text: 12345 } } })),
-    ]);
-    const client = createHerdrClient(runner);
-
-    const err = await client.agentRead("w3:p1").catch((e: unknown) => e);
-
-    expect(err).toBeInstanceOf(HerdrError);
-    expect((err as HerdrError).code).toBe("invalid_response");
-    expect((err as HerdrError).message).toContain("expected result.read.text to be a string");
-  });
+  // There is no agentRead guard to cover here any more: herdr never wraps
+  // `agent read` in a `{result:{read:{text}}}` envelope (herdr 0.7.5 has no
+  // json format for it), so the guard that asserted that shape was testing a
+  // contract that does not exist. The raw path's real contract - verbatim
+  // stdout on exit 0, herdr's own error code on a nonzero exit - is covered
+  // in the DW-2.1 and DW-2.2 blocks above.
 
   it("workspaceList throws invalid_response when result.workspaces is present but not an array", async () => {
     const { runner } = stubRunner([ok(JSON.stringify({ id: "cli:workspace:list", result: { workspaces: "not-an-array" } }))]);

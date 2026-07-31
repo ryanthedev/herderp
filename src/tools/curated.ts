@@ -30,7 +30,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerTool } from "../registry.js";
 import type { HerdrClient } from "../herdr/client.js";
-import type { AgentKind } from "../herdr/types.js";
+import type { AgentKind, AgentReadSource } from "../herdr/types.js";
 
 /** `--until` on both `agent wait` and `agent prompt`. Verbatim from herdr
  * 0.7.5's help: `[possible values: idle, working, blocked, done, unknown]`.
@@ -44,7 +44,11 @@ const AGENT_KIND = z.enum([
   "omp", "mastracode", "opencode", "copilot", "kimi", "kiro", "droid",
   "amp", "grok", "hermes", "kilo", "qodercli", "maki",
 ] as const satisfies readonly AgentKind[]);
-const AGENT_READ_SOURCE = z.enum(["visible", "recent", "recent-unwrapped"]);
+/** `--source` on `agent read`, verbatim from herdr 0.7.5's help. "detection"
+ * was missing here, so the tool rejected a value the CLI accepts. */
+const AGENT_READ_SOURCE = z.enum([
+  "visible", "recent", "recent-unwrapped", "detection",
+] as const satisfies readonly AgentReadSource[]);
 const AGENT_READ_FORMAT = z.enum(["text", "ansi"]);
 const DIRECTION = z.enum(["left", "right", "up", "down"]);
 const SPLIT_DIRECTION = z.enum(["right", "down"]);
@@ -90,7 +94,7 @@ export function registerCuratedTools(server: McpServer, client: HerdrClient): vo
     description:
       "Inspect and control the coding agents running in herdr panes. One tool, many actions - pick with `action`:\n" +
       "- list: every agent (needs nothing else). get: one agent's status/cwd/ids (target).\n" +
-      "- read: scrollback text (target; optional source/lines/format/ansi).\n" +
+      "- read: scrollback text (target; optional source/lines/format/ansi). source: recent (default), visible, recent-unwrapped, or detection - the view herdr's own detector sees, worth a look alongside action:'explain'.\n" +
       "- prompt: submit TEXT to the agent as a prompt - this is how you ask an agent to do something (target, text; optional wait, until, timeoutMs). wait:true blocks until it settles.\n" +
       "- send_keys: send NAMED keys, e.g. keys:['esc'] to clear a composer (target, keys). Key names only - herdr rejects unknown ones with invalid_key, and there is no key for arbitrary text. Use prompt for text.\n" +
       "- focus: bring the agent's pane to the front (target).\n" +

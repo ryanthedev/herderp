@@ -12,6 +12,7 @@ import { describe, expect, it } from "bun:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerCuratedTools } from "../../src/tools/curated.js";
 import type { HerdrClient } from "../../src/herdr/client.js";
+import { HerdrError } from "../../src/herdr/types.js";
 import type { Agent, Pane, Session, Tab, Workspace, Worktree } from "../../src/herdr/types.js";
 
 const STUB_AGENT: Agent = {
@@ -307,15 +308,46 @@ describe("registerCuratedTools - resource+action tool surface", () => {
     expect(text).toBe('herdr_agent{action:"get"} requires "target"');
   });
 
-  it("a thrown HerdrError from the client surfaces as isError, not a crash", async () => {
+  it("a thrown HerdrError surfaces as isError and leads with herdr's own code", async () => {
+    // This test used to throw a plain Error while claiming to be about
+    // HerdrError, so it never checked that the code reached the caller - and
+    // it did not: the boundary rendered the message alone.
     const tools = withTools({
       agentGet: async () => {
-        throw new Error("agent target bogus not found");
+        throw new HerdrError("agent_not_found", "agent target bogus not found");
       },
     });
     const { isError, text } = await call(tools, "herdr_agent", { action: "get", target: "bogus" });
     expect(isError).toBe(true);
-    expect(text).toContain("agent target bogus not found");
+    expect(text).toBe("[agent_not_found] agent target bogus not found");
+  });
+
+  it("a plain Error from a tool guard carries no code and is rendered unchanged", async () => {
+    const tools = withTools();
+    const { isError, text } = await call(tools, "herdr_agent", { action: "read" });
+    expect(isError).toBe(true);
+    expect(text).toBe('herdr_agent{action:"read"} requires "target"');
+  });
+
+  it("agent read accepts source:'detection', which the CLI allows", async () => {
+    // herdr 0.7.5: `--source [possible values: visible, recent,
+    // recent-unwrapped, detection]`. "detection" was missing from the enum,
+    // so the tool rejected a value the binary accepts.
+    let read: unknown;
+    const tools = withTools({
+      agentRead: async (target, opts) => {
+        read = { target, opts };
+        return "pane output";
+      },
+    });
+
+    const { isError } = await call(tools, "herdr_agent", { action: "read", target: "w1:p1", source: "detection" });
+
+    expect(isError).toBeFalsy();
+    expect(read).toEqual({
+      target: "w1:p1",
+      opts: { source: "detection", lines: undefined, format: undefined, ansi: undefined },
+    });
   });
 
   it("pane run submits the command and pane focus is directional, anchored on current by default", async () => {

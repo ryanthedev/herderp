@@ -71,8 +71,17 @@ export interface Session {
   running: boolean;
 }
 
+/** Snapshot sources `agent read --source` accepts, verbatim from herdr
+ * 0.7.5's help: `[possible values: visible, recent, recent-unwrapped,
+ * detection]`, default `recent`. "detection" is the view herdr's own agent
+ * detector works from - useful next to `agent explain` when a reported
+ * status looks wrong. (It was missing from this union, so callers could not
+ * ask for it even though the CLI accepts it; herdr rejects an unknown source
+ * with `invalid read source: <value>` at exit 1.) */
+export type AgentReadSource = "visible" | "recent" | "recent-unwrapped" | "detection";
+
 export interface AgentReadOptions {
-  source?: "visible" | "recent" | "recent-unwrapped";
+  source?: AgentReadSource;
   lines?: number;
   format?: "text" | "ansi";
   ansi?: boolean;

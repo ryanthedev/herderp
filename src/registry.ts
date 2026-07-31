@@ -66,10 +66,9 @@ export function registerTool<Shape extends ToolInputShape>(
       const result = await handler(args);
       return { content: [{ type: "text" as const, text: toText(result) }] };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
       console.error(`[herderp] tool "${name}" failed:`, error);
       return {
-        content: [{ type: "text" as const, text: message }],
+        content: [{ type: "text" as const, text: errorText(error) }],
         isError: true,
       };
     }
@@ -80,4 +79,27 @@ export function registerTool<Shape extends ToolInputShape>(
 
 function toText(result: ToolResult): string {
   return typeof result === "string" ? result : JSON.stringify(result);
+}
+
+/**
+ * Renders a thrown error for the MCP client, leading with its `code` when it
+ * has one: `[agent_not_found] agent target w9:p1 not found`.
+ *
+ * The code is the actionable half. `agent_not_found` tells a caller to fix
+ * the target and retry; `command_failed` tells it the message is all there
+ * is; `wait_timeout` tells it to wait longer rather than re-issue. Rendering
+ * the message alone threw that away at the tool boundary - HerdrClient did
+ * the work of recovering herdr's own codes and nothing downstream could see
+ * them.
+ *
+ * Read structurally rather than via `instanceof`: both HerdrError and
+ * NecromancyError carry a string `code`, and registry.ts is shared
+ * infrastructure that must not import the domains registering through it.
+ * An untyped `Error` (the `need()` guards in tools/curated.ts, for instance)
+ * has no code and renders exactly as before.
+ */
+function errorText(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const { code } = error as { code?: unknown };
+  return typeof code === "string" && code !== "" ? `[${code}] ${error.message}` : error.message;
 }

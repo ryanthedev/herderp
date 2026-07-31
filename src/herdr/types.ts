@@ -78,13 +78,54 @@ export interface AgentReadOptions {
   ansi?: boolean;
 }
 
-/** `agent wait --status` accepts only these four - NOT "done", which appears
- * in AgentStatus (a reported value) but is not waitable (verified against
- * `herdr agent wait --help`). Keep the two unions separate for that reason. */
+/**
+ * States `agent wait --until` and `agent prompt --until` accept. Verified
+ * against `herdr agent wait --help` on 0.7.5: `[possible values: idle,
+ * working, blocked, done, unknown]` - identical to AgentStatus, "done"
+ * included. (A previous version of this file asserted the opposite and
+ * excluded "done"; it was wrong, and it excluded the single most useful state
+ * to wait for, since "done" is where an agent rests after finishing.)
+ */
+export type AgentWaitStatus = AgentStatus;
+
+/**
+ * `--until` is repeatable, so `status` takes one state or several and the
+ * wait resolves on the first match. Omit it entirely to get herdr's own
+ * default, which is "idle, done, or blocked" - i.e. any settled state.
+ * Without `timeoutMs` herdr waits indefinitely.
+ */
 export interface AgentWaitOptions {
-  status: "idle" | "working" | "blocked" | "unknown";
+  status?: AgentWaitStatus | AgentWaitStatus[];
   timeoutMs?: number;
 }
+
+/**
+ * `agent prompt <TARGET> <TEXT> [OPTIONS]` - submits TEXT to the agent as a
+ * prompt (submission included; this is not a keystroke channel).
+ *
+ * `wait` blocks until the agent settles after submission. herdr's own
+ * semantics, quoted from `agent prompt --help`: from a non-working state it
+ * first requires an observed state change within 5000ms, else it returns
+ * `agent_prompt_stalled` (a shorter `timeoutMs` returns `timeout` instead);
+ * it then matches idle/done/blocked by default, or exactly the `until` states.
+ * It does NOT track turns - if the agent is already working, that in-flight
+ * turn's completion can satisfy the wait.
+ */
+export interface AgentPromptOptions {
+  wait?: boolean;
+  until?: AgentWaitStatus | AgentWaitStatus[];
+  timeoutMs?: number;
+}
+
+/**
+ * Agent kinds `agent start --kind` accepts, verbatim from `agent start
+ * --help` on herdr 0.7.5. herdr rejects anything outside this list at
+ * argument parsing, so it is pinned here rather than left an open string.
+ */
+export type AgentKind =
+  | "pi" | "claude" | "codex" | "gemini" | "cursor" | "devin" | "agy" | "cline"
+  | "omp" | "mastracode" | "opencode" | "copilot" | "kimi" | "kiro" | "droid"
+  | "amp" | "grok" | "hermes" | "kilo" | "qodercli" | "maki";
 
 export interface WorkspaceCreateOptions {
   cwd: string;
@@ -100,17 +141,31 @@ export interface TabCreateOptions {
   focus?: boolean;
 }
 
-/** `agent start <name> [flags] -- <argv...>`. `name` is the agent label herdr
- * registers; `argv` is the command line after the `--` separator. */
+/**
+ * `agent start <NAME> --kind <KIND> --pane <ID> [--timeout <MS>] [-- <args>]`,
+ * verbatim from `agent start --help` on herdr 0.7.5.
+ *
+ * herdr does NOT create the pane: `paneId` must already exist and be sitting
+ * at an interactive shell prompt. Start therefore composes with paneSplit /
+ * tabCreate / workspaceCreate rather than replacing them - make the pane
+ * first, then start into it.
+ *
+ * (An earlier version of this interface offered `cwd`, `workspaceId`, `tabId`,
+ * `split`, `env` and `focus`. herdr accepts none of them - every one is
+ * rejected with `unknown option` - and it required neither of the two flags
+ * that are actually mandatory, so no call could ever succeed.)
+ */
 export interface AgentStartOptions {
+  /** The label herdr registers the agent under; also a valid `target`. */
   name: string;
-  argv: string[];
-  cwd?: string;
-  workspaceId?: string;
-  tabId?: string;
-  split?: "right" | "down";
-  env?: string[];
-  focus?: boolean;
+  kind: AgentKind;
+  /** An EXISTING pane at its interactive shell prompt. */
+  paneId: string;
+  /** How long to wait for interactive readiness. herdr default 30000, max
+   * 300000; herdr rejects anything larger at argument parsing. */
+  timeoutMs?: number;
+  /** Extra argv passed to the agent binary itself, after herdr's `--`. */
+  argv?: string[];
 }
 
 /**

@@ -13,10 +13,12 @@
 
 import type {
   Agent,
+  AgentPromptOptions,
   AgentReadOptions,
   AgentStartOptions,
   AgentStatus,
   AgentWaitOptions,
+  AgentWaitStatus,
   Pane,
   Session,
   Tab,
@@ -77,9 +79,19 @@ export interface HerdrClient {
   // `{error:{code,message}}` body). Asserting an unverified result shape
   // would invent a contract; ignoring stdout cannot be wrong.
 
-  /** Types literal text into the agent (no trailing Enter - use paneRun when
-   * you want command text plus Enter). */
-  agentSend(target: string, text: string): Promise<void>;
+  /**
+   * Submits `text` to the agent as a prompt (`agent prompt`) - submission
+   * included, so this is the "ask the agent something" primitive, not a
+   * keystroke channel. Pass `wait` to block until the agent settles.
+   */
+  agentPrompt(target: string, text: string, opts?: AgentPromptOptions): Promise<void>;
+  /**
+   * Sends NAMED key presses (`agent send-keys`) - `esc`, `backspace`, and the
+   * like. This is a control channel, NOT a way to type text: herdr validates
+   * every key against its own name table and rejects anything it does not
+   * know with `invalid_key`. Use `agentPrompt` for text.
+   */
+  agentSendKeys(target: string, keys: string[]): Promise<void>;
   agentFocus(target: string): Promise<void>;
   /** Renames an agent, or clears a custom name when `name` is null. */
   agentRename(target: string, name: string | null): Promise<void>;
@@ -472,6 +484,15 @@ function renameArg(name: string | null): string {
   return name === null ? "--clear" : name;
 }
 
+/** `--until` is repeatable, one flag pair per state; omitting it entirely is
+ * meaningful (herdr then matches any settled state), so an absent or empty
+ * selection must emit nothing rather than a bare flag. */
+function untilFlags(status?: AgentWaitStatus | AgentWaitStatus[]): string[] {
+  if (status === undefined) return [];
+  const states = Array.isArray(status) ? status : [status];
+  return states.flatMap((state) => ["--until", state]);
+}
+
 function agentReadFlags(opts?: AgentReadOptions): string[] {
   if (!opts) return [];
   const flags: string[] = [];
@@ -509,13 +530,12 @@ export function createHerdrClient(runner: HerdrRunner = bunHerdrRunner): HerdrCl
       return runHerdrRaw(runner, ["agent", "read", target, ...agentReadFlags(opts)]);
     },
 
-    async agentWait(target, { status, timeoutMs }) {
+    async agentWait(target, { status, timeoutMs } = {}) {
       const argv = [
         "agent",
         "wait",
         target,
-        "--status",
-        status,
+        ...untilFlags(status),
         ...(timeoutMs !== undefined ? ["--timeout", String(timeoutMs)] : []),
       ];
       try {
@@ -635,8 +655,28 @@ export function createHerdrClient(runner: HerdrRunner = bunHerdrRunner): HerdrCl
       return panes.map((raw) => mapPane(raw, argv));
     },
 
-    async agentSend(target, text) {
-      await runHerdrVoid(runner, ["agent", "send", target, text]);
+    async agentPrompt(target, text, opts) {
+      await runHerdrVoid(runner, [
+        "agent",
+        "prompt",
+        target,
+        text,
+        // `--until`/`--timeout` are only meaningful alongside `--wait`, but
+        // herdr accepts them either way, so they are passed as given rather
+        // than second-guessed here.
+        ...(opts?.wait ? ["--wait"] : []),
+        ...untilFlags(opts?.until),
+        ...(opts?.timeoutMs !== undefined ? ["--timeout", String(opts.timeoutMs)] : []),
+      ]);
+    },
+
+    async agentSendKeys(target, keys) {
+      if (keys.length === 0) {
+        // herdr's `<KEY>...` is variadic-but-required; sending none is a usage
+        // error at exit 2. Naming it here beats relaying herdr's help text.
+        throw new HerdrError("invalid_request", "agent send-keys requires at least one key");
+      }
+      await runHerdrVoid(runner, ["agent", "send-keys", target, ...keys]);
     },
 
     async agentFocus(target) {
@@ -647,21 +687,20 @@ export function createHerdrClient(runner: HerdrRunner = bunHerdrRunner): HerdrCl
       await runHerdrVoid(runner, ["agent", "rename", target, renameArg(name)]);
     },
 
-    async agentStart({ name, argv: command, cwd, workspaceId, tabId, split, env, focus }) {
+    async agentStart({ name, kind, paneId, timeoutMs, argv: command }) {
       await runHerdrVoid(runner, [
         "agent",
         "start",
         name,
-        ...(cwd !== undefined ? ["--cwd", cwd] : []),
-        ...(workspaceId !== undefined ? ["--workspace", workspaceId] : []),
-        ...(tabId !== undefined ? ["--tab", tabId] : []),
-        ...(split !== undefined ? ["--split", split] : []),
-        ...envFlags(env),
-        ...focusFlags(focus),
-        // The `--` separator is mandatory: everything after it is the agent's
-        // own argv, which herdr must not parse as its own flags.
-        "--",
-        ...command,
+        "--kind",
+        kind,
+        "--pane",
+        paneId,
+        ...(timeoutMs !== undefined ? ["--timeout", String(timeoutMs)] : []),
+        // The `--` separator introduces the agent's OWN argv, which herdr must
+        // not parse as its own flags. Emitted only when there is argv to carry
+        // - a trailing bare `--` is noise in the process table.
+        ...(command !== undefined && command.length > 0 ? ["--", ...command] : []),
       ]);
     },
 

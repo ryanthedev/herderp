@@ -108,7 +108,10 @@ describe("HerdrClient - DW-2.1 parse-success per method", () => {
     expect(await client.agentRead("w3:p1")).toBe("  indented\n\n");
   });
 
-  it("DW_2_1_agentWait_spawns_agent_wait_with_status_and_timeout_and_maps_result", async () => {
+  // The flag is `--until`, not `--status`. Verified against herdr 0.7.5:
+  // `herdr agent wait <t> --status idle` exits 2 with `unknown option:
+  // --status`, so the argv this client sent could never reach a real wait.
+  it("DW_2_1_agentWait_spawns_agent_wait_with_until_and_timeout_and_maps_result", async () => {
     const { runner, calls } = stubRunner([
       ok(JSON.stringify({ id: "cli:agent:wait:resolve", result: { agent: RAW_AGENT, type: "agent_info" } })),
     ]);
@@ -116,8 +119,116 @@ describe("HerdrClient - DW-2.1 parse-success per method", () => {
 
     const agent = await client.agentWait("w3:p1", { status: "idle", timeoutMs: 500 });
 
-    expect(calls).toEqual([["agent", "wait", "w3:p1", "--status", "idle", "--timeout", "500"]]);
+    expect(calls).toEqual([["agent", "wait", "w3:p1", "--until", "idle", "--timeout", "500"]]);
     expect(agent).toEqual(MAPPED_AGENT);
+  });
+
+  it("DW_2_1_agentWait_repeats_until_once_per_state", async () => {
+    // herdr: "--until <STATUS>  State to match; repeat for more than one".
+    const { runner, calls } = stubRunner([
+      ok(JSON.stringify({ id: "cli:agent:wait:resolve", result: { agent: RAW_AGENT } })),
+    ]);
+    const client = createHerdrClient(runner);
+
+    await client.agentWait("w3:p1", { status: ["idle", "done"] });
+
+    expect(calls).toEqual([["agent", "wait", "w3:p1", "--until", "idle", "--until", "done"]]);
+  });
+
+  it("DW_2_1_agentWait_emits_no_until_flag_when_no_state_is_requested", async () => {
+    // Omitting --until is meaningful, not a mistake: herdr then matches
+    // "idle, done, or blocked". A bare `--until` would be a usage error.
+    const { runner, calls } = stubRunner([
+      ok(JSON.stringify({ id: "cli:agent:wait:resolve", result: { agent: RAW_AGENT } })),
+    ]);
+    const client = createHerdrClient(runner);
+
+    await client.agentWait("w3:p1", {});
+
+    expect(calls).toEqual([["agent", "wait", "w3:p1"]]);
+  });
+
+  it("DW_2_1_agentWait_accepts_done_which_the_CLI_allows", async () => {
+    // `agent wait --help` lists done among the possible values. The client
+    // used to exclude it in its own type, removing the state an agent
+    // actually rests in after finishing.
+    const { runner, calls } = stubRunner([
+      ok(JSON.stringify({ id: "cli:agent:wait:resolve", result: { agent: RAW_AGENT } })),
+    ]);
+    const client = createHerdrClient(runner);
+
+    await client.agentWait("w3:p1", { status: "done" });
+
+    expect(calls).toEqual([["agent", "wait", "w3:p1", "--until", "done"]]);
+  });
+
+  it("DW_2_1_agentPrompt_spawns_agent_prompt_with_the_text_as_a_positional", async () => {
+    // `herdr agent prompt <TARGET> <TEXT>` - the replacement for the
+    // `agent send` subcommand this client used to shell, which herdr 0.7.5
+    // does not have at all.
+    const { runner, calls } = stubRunner([ok("")]);
+    const client = createHerdrClient(runner);
+
+    await client.agentPrompt("w3:p1", "run the tests");
+
+    expect(calls).toEqual([["agent", "prompt", "w3:p1", "run the tests"]]);
+  });
+
+  it("DW_2_1_agentPrompt_passes_wait_until_and_timeout_flags", async () => {
+    const { runner, calls } = stubRunner([ok("")]);
+    const client = createHerdrClient(runner);
+
+    await client.agentPrompt("w3:p1", "go", { wait: true, until: ["done", "blocked"], timeoutMs: 60000 });
+
+    expect(calls).toEqual([
+      ["agent", "prompt", "w3:p1", "go", "--wait", "--until", "done", "--until", "blocked", "--timeout", "60000"],
+    ]);
+  });
+
+  it("DW_2_1_agentSendKeys_spawns_send_keys_with_one_positional_per_key", async () => {
+    const { runner, calls } = stubRunner([ok("")]);
+    const client = createHerdrClient(runner);
+
+    await client.agentSendKeys("w3:p1", ["esc", "esc"]);
+
+    expect(calls).toEqual([["agent", "send-keys", "w3:p1", "esc", "esc"]]);
+  });
+
+  it("DW_2_1_agentSendKeys_rejects_an_empty_key_list_before_spawning", async () => {
+    const { runner, calls } = stubRunner([]);
+    const client = createHerdrClient(runner);
+
+    const err = await client.agentSendKeys("w3:p1", []).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HerdrError);
+    expect((err as HerdrError).code).toBe("invalid_request");
+    expect(calls).toEqual([]);
+  });
+
+  it("DW_2_1_agentStart_spawns_the_real_kind_and_pane_grammar", async () => {
+    // `agent start <NAME> --kind <KIND> --pane <ID> [--timeout MS] [-- args]`.
+    // The old argv sent --cwd/--workspace/--tab/--split/--env/--focus, every
+    // one of which herdr rejects with `unknown option`, and sent neither of
+    // the two flags that are actually required.
+    const { runner, calls } = stubRunner([ok("")]);
+    const client = createHerdrClient(runner);
+
+    await client.agentStart({ name: "worker", kind: "claude", paneId: "w3:p1", timeoutMs: 45000 });
+
+    expect(calls).toEqual([["agent", "start", "worker", "--kind", "claude", "--pane", "w3:p1", "--timeout", "45000"]]);
+  });
+
+  it("DW_2_1_agentStart_appends_agent_argv_after_the_separator_and_omits_a_bare_one", async () => {
+    const { runner, calls } = stubRunner([ok(""), ok("")]);
+    const client = createHerdrClient(runner);
+
+    await client.agentStart({ name: "w", kind: "codex", paneId: "w3:p1", argv: ["--model", "o3"] });
+    await client.agentStart({ name: "w", kind: "codex", paneId: "w3:p1", argv: [] });
+
+    expect(calls).toEqual([
+      ["agent", "start", "w", "--kind", "codex", "--pane", "w3:p1", "--", "--model", "o3"],
+      ["agent", "start", "w", "--kind", "codex", "--pane", "w3:p1"],
+    ]);
   });
 
   it("DW_2_1_workspaceList_spawns_workspace_list_then_joins_cwd_via_pane_list_per_workspace", async () => {
@@ -564,7 +675,7 @@ describe("HerdrClient - DW-2.2/DW-2.4 error normalization (stubbed spawn, no liv
 
     const err = await client.agentWait("w3:p1", { status: "working", timeoutMs: 200 }).catch((e: unknown) => e);
 
-    expect(calls).toEqual([["agent", "wait", "w3:p1", "--status", "working", "--timeout", "200"]]);
+    expect(calls).toEqual([["agent", "wait", "w3:p1", "--until", "working", "--timeout", "200"]]);
     expect(err).toBeInstanceOf(HerdrError);
     expect((err as HerdrError).code).toBe("wait_timeout");
     expect((err as HerdrError).message).toBe("timed out waiting for agent status");
@@ -594,10 +705,11 @@ describe("HerdrClient - DW-2.2/DW-2.4 error normalization (stubbed spawn, no liv
   });
 
   it("DW_2_2_agentWait_non_timeout_command_failure_stays_command_failed", async () => {
-    // Verified live: herdr 0.7.5 rejects this client's `--status` spelling
-    // with `unknown option: --status` on stderr at exit 2 (see the known-gaps
-    // note on agentWait). A usage failure must not be read as a timeout.
-    const { runner } = stubRunner([fail(2, { stderr: "unknown option: --status\n" })]);
+    // A usage failure must not be read as a timeout. (This stub used to be
+    // `unknown option: --status`, which was herdr rejecting the client's own
+    // wrong flag - real, but a bug rather than a contract. The argv is
+    // correct now, so the case is stated with generic usage text.)
+    const { runner } = stubRunner([fail(2, { stderr: "usage: herdr agent wait <TARGET>\n" })]);
     const client = createHerdrClient(runner);
 
     const err = await client.agentWait("w3:p1", { status: "working" }).catch((e: unknown) => e);

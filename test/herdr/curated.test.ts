@@ -58,7 +58,8 @@ function stubClient(overrides: Partial<HerdrClient> = {}): HerdrClient {
     agentGet: async () => STUB_AGENT,
     agentRead: async () => "pane output",
     agentWait: async () => STUB_AGENT,
-    agentSend: async () => undefined,
+    agentPrompt: async () => undefined,
+    agentSendKeys: async () => undefined,
     agentFocus: async () => undefined,
     agentRename: async () => undefined,
     agentStart: async () => undefined,
@@ -167,27 +168,73 @@ describe("registerCuratedTools - resource+action tool surface", () => {
     });
 
     await call(tools, "herdr_agent", { action: "read", target: "w1:p1", source: "recent", lines: 5 });
-    await call(tools, "herdr_agent", { action: "wait", target: "w1:p1", status: "working", timeoutMs: 1000 });
+    // The wait field is `until`, matching herdr's own `--until` flag, and it
+    // takes a list. The old field was `status`, which read as "the status an
+    // agent reports" - the confusion that produced the tool's false claim
+    // that `done` was not waitable.
+    await call(tools, "herdr_agent", { action: "wait", target: "w1:p1", until: ["done", "blocked"], timeoutMs: 1000 });
 
     expect(read).toEqual({
       target: "w1:p1",
       opts: { source: "recent", lines: 5, format: undefined, ansi: undefined },
     });
-    expect(wait).toEqual({ target: "w1:p1", opts: { status: "working", timeoutMs: 1000 } });
+    expect(wait).toEqual({ target: "w1:p1", opts: { status: ["done", "blocked"], timeoutMs: 1000 } });
   });
 
-  it("agent send passes literal text and does not claim to have pressed Enter", async () => {
-    let sent: unknown;
+  it("agent wait forwards no state at all when until is omitted", async () => {
+    let wait: unknown;
     const tools = withTools({
-      agentSend: async (target, text) => {
-        sent = { target, text };
+      agentWait: async (target, opts) => {
+        wait = { target, opts };
+        return STUB_AGENT;
       },
     });
-    const { body } = await call(tools, "herdr_agent", { action: "send", target: "w1:p1", text: "hello" });
 
-    expect(sent).toEqual({ target: "w1:p1", text: "hello" });
+    await call(tools, "herdr_agent", { action: "wait", target: "w1:p1" });
+
+    // `until` must not be forced through `need` - omitting it is how a caller
+    // asks for "any settled state", which is herdr's own default.
+    expect(wait).toEqual({ target: "w1:p1", opts: { status: undefined, timeoutMs: undefined } });
+  });
+
+  it("agent prompt submits text and points at how to collect the answer", async () => {
+    let sent: unknown;
+    const tools = withTools({
+      agentPrompt: async (target, text, opts) => {
+        sent = { target, text, opts };
+      },
+    });
+    const { body } = await call(tools, "herdr_agent", {
+      action: "prompt",
+      target: "w1:p1",
+      text: "run the tests",
+      wait: true,
+      until: "done",
+    });
+
+    expect(sent).toEqual({
+      target: "w1:p1",
+      text: "run the tests",
+      opts: { wait: true, until: "done", timeoutMs: undefined },
+    });
     expect(body.ok).toBe(true);
-    expect(String(body.hint)).toContain("no Enter");
+    expect(String(body.hint)).toContain("settled");
+  });
+
+  it("agent send_keys forwards named keys and rejects an empty list", async () => {
+    let keys: unknown;
+    const tools = withTools({
+      agentSendKeys: async (target, k) => {
+        keys = { target, keys: k };
+      },
+    });
+
+    const empty = await call(tools, "herdr_agent", { action: "send_keys", target: "w1:p1", keys: [] });
+    expect(empty.isError).toBe(true);
+    expect(empty.text).toContain("keys");
+
+    await call(tools, "herdr_agent", { action: "send_keys", target: "w1:p1", keys: ["esc"] });
+    expect(keys).toEqual({ target: "w1:p1", keys: ["esc"] });
   });
 
   it("agent rename sends the new name, and clear:true sends null", async () => {
@@ -219,7 +266,9 @@ describe("registerCuratedTools - resource+action tool surface", () => {
     expect(text).toContain('either "name" or "clear"');
   });
 
-  it("agent start requires a non-empty argv and forwards it", async () => {
+  it("agent start requires kind and paneId - the two flags herdr actually mandates", async () => {
+    // Before this fix the action exposed neither, and demanded `argv`
+    // instead, so no input at all could produce a working call.
     let started: unknown;
     const tools = withTools({
       agentStart: async (opts) => {
@@ -227,12 +276,28 @@ describe("registerCuratedTools - resource+action tool surface", () => {
       },
     });
 
-    const missing = await call(tools, "herdr_agent", { action: "start", name: "worker" });
-    expect(missing.isError).toBe(true);
-    expect(missing.text).toContain("argv");
+    const noKind = await call(tools, "herdr_agent", { action: "start", name: "worker", paneId: "w1:p1" });
+    expect(noKind.isError).toBe(true);
+    expect(noKind.text).toContain("kind");
 
-    await call(tools, "herdr_agent", { action: "start", name: "worker", argv: ["claude"], cwd: "/tmp/p" });
-    expect(started).toMatchObject({ name: "worker", argv: ["claude"], cwd: "/tmp/p" });
+    const noPane = await call(tools, "herdr_agent", { action: "start", name: "worker", kind: "claude" });
+    expect(noPane.isError).toBe(true);
+    expect(noPane.text).toContain("paneId");
+
+    await call(tools, "herdr_agent", {
+      action: "start",
+      name: "worker",
+      kind: "claude",
+      paneId: "w1:p1",
+      argv: ["--model", "opus"],
+    });
+    expect(started).toEqual({
+      name: "worker",
+      kind: "claude",
+      paneId: "w1:p1",
+      timeoutMs: undefined,
+      argv: ["--model", "opus"],
+    });
   });
 
   it("a missing required field names the tool, the action and the field", async () => {

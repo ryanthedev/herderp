@@ -30,8 +30,20 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerTool } from "../registry.js";
 import type { HerdrClient } from "../herdr/client.js";
+import type { AgentKind } from "../herdr/types.js";
 
-const AGENT_WAIT_STATUS = z.enum(["idle", "working", "blocked", "unknown"]);
+/** `--until` on both `agent wait` and `agent prompt`. Verbatim from herdr
+ * 0.7.5's help: `[possible values: idle, working, blocked, done, unknown]`.
+ * "done" belongs here - an earlier version of this file excluded it and said
+ * so in the tool description, which was simply wrong. */
+const AGENT_WAIT_STATUS = z.enum(["idle", "working", "blocked", "done", "unknown"]);
+/** `--kind` on `agent start`, verbatim from herdr 0.7.5's help. Kept as a
+ * closed enum because herdr rejects anything else at argument parsing. */
+const AGENT_KIND = z.enum([
+  "pi", "claude", "codex", "gemini", "cursor", "devin", "agy", "cline",
+  "omp", "mastracode", "opencode", "copilot", "kimi", "kiro", "droid",
+  "amp", "grok", "hermes", "kilo", "qodercli", "maki",
+] as const satisfies readonly AgentKind[]);
 const AGENT_READ_SOURCE = z.enum(["visible", "recent", "recent-unwrapped"]);
 const AGENT_READ_FORMAT = z.enum(["text", "ansi"]);
 const DIRECTION = z.enum(["left", "right", "up", "down"]);
@@ -79,32 +91,31 @@ export function registerCuratedTools(server: McpServer, client: HerdrClient): vo
       "Inspect and control the coding agents running in herdr panes. One tool, many actions - pick with `action`:\n" +
       "- list: every agent (needs nothing else). get: one agent's status/cwd/ids (target).\n" +
       "- read: scrollback text (target; optional source/lines/format/ansi).\n" +
-      "- send: type literal text into the agent, NO trailing Enter (target, text). Use herdr_pane{action:'run'} when you want command text plus Enter.\n" +
+      "- prompt: submit TEXT to the agent as a prompt - this is how you ask an agent to do something (target, text; optional wait, until, timeoutMs). wait:true blocks until it settles.\n" +
+      "- send_keys: send NAMED keys, e.g. keys:['esc'] to clear a composer (target, keys). Key names only - herdr rejects unknown ones with invalid_key, and there is no key for arbitrary text. Use prompt for text.\n" +
       "- focus: bring the agent's pane to the front (target).\n" +
       "- rename: give an agent a stable name, or clear:true to drop a custom one (target, then name or clear).\n" +
-      "- start: launch a new agent (name, argv; optional cwd/workspaceId/tabId/split/env/focus).\n" +
-      "- wait: block until the agent reaches a status (target, status; optional timeoutMs). status accepts idle/working/blocked/unknown - NOT 'done'.\n" +
+      "- start: run an agent binary in an EXISTING pane (name, kind, paneId; optional timeoutMs, argv). herdr does not make the pane - create one with herdr_pane{action:'split'} or herdr_workspace{action:'create'} first, and it must be at a shell prompt.\n" +
+      "- wait: block until the agent reaches a state (target; optional until, timeoutMs). until takes one state or several and matches the first to arrive; omit it for any settled state (idle/done/blocked). 'done' IS accepted, and is usually what you want after prompting.\n" +
       "- explain: herdr's own diagnosis of how it detected this agent's state (target) - reach for it when a reported status looks wrong.\n" +
       "`target` accepts a terminal id, a unique agent name, a detected agent label, or a legacy pane id.",
     inputSchema: {
-      action: z.enum(["list", "get", "read", "send", "focus", "rename", "start", "wait", "explain"]),
+      action: z.enum(["list", "get", "read", "prompt", "send_keys", "focus", "rename", "start", "wait", "explain"]),
       target: z.string().optional(),
       text: z.string().optional(),
+      keys: z.array(z.string()).optional(),
       name: z.string().optional(),
       clear: z.boolean().optional(),
       source: AGENT_READ_SOURCE.optional(),
       lines: z.number().int().positive().optional(),
       format: AGENT_READ_FORMAT.optional(),
       ansi: z.boolean().optional(),
-      status: AGENT_WAIT_STATUS.optional(),
+      wait: z.boolean().optional(),
+      until: z.union([AGENT_WAIT_STATUS, z.array(AGENT_WAIT_STATUS)]).optional(),
       timeoutMs: z.number().int().positive().optional(),
+      kind: AGENT_KIND.optional(),
+      paneId: z.string().optional(),
       argv: z.array(z.string()).optional(),
-      cwd: z.string().optional(),
-      workspaceId: z.string().optional(),
-      tabId: z.string().optional(),
-      split: SPLIT_DIRECTION.optional(),
-      env: z.array(z.string()).optional(),
-      focus: z.boolean().optional(),
     },
     handler: async (args) => {
       const tool = "herdr_agent";
@@ -125,9 +136,25 @@ export function registerCuratedTools(server: McpServer, client: HerdrClient): vo
               ansi: args.ansi,
             }),
           };
-        case "send":
-          await client.agentSend(need(args.target, "target", tool, "send"), need(args.text, "text", tool, "send"));
-          return ok("text typed (no Enter sent); herdr_agent{action:'read'} to see the result");
+        case "prompt":
+          await client.agentPrompt(
+            need(args.target, "target", tool, "prompt"),
+            need(args.text, "text", tool, "prompt"),
+            { wait: args.wait, until: args.until, timeoutMs: args.timeoutMs },
+          );
+          return ok(
+            args.wait
+              ? "prompt submitted and the agent settled; herdr_agent{action:'read'} to see what it produced"
+              : "prompt submitted; herdr_agent{action:'wait',until:'done'} then {action:'read'} to collect the answer",
+          );
+        case "send_keys": {
+          const keys = args.keys ?? [];
+          if (keys.length === 0) {
+            throw new Error(`${tool}{action:"send_keys"} requires a non-empty "keys" (e.g. ["esc"])`);
+          }
+          await client.agentSendKeys(need(args.target, "target", tool, "send_keys"), keys);
+          return ok("keys sent; herdr_agent{action:'read'} to see the result");
+        }
         case "focus":
           await client.agentFocus(need(args.target, "target", tool, "focus"));
           return ok("agent focused");
@@ -143,28 +170,24 @@ export function registerCuratedTools(server: McpServer, client: HerdrClient): vo
         }
         case "start": {
           const name = need(args.name, "name", tool, "start");
-          if (args.argv === undefined || args.argv.length === 0) {
-            throw new Error(`${tool}{action:"start"} requires a non-empty "argv" (the agent's own command line)`);
-          }
           await client.agentStart({
             name,
+            kind: need(args.kind, "kind", tool, "start"),
+            paneId: need(args.paneId, "paneId", tool, "start"),
+            timeoutMs: args.timeoutMs,
             argv: args.argv,
-            cwd: args.cwd,
-            workspaceId: args.workspaceId,
-            tabId: args.tabId,
-            split: args.split,
-            env: args.env,
-            focus: args.focus,
           });
           return ok(`started; herdr_agent{action:'get',target:"${name}"} to confirm it came up`);
         }
         case "wait":
           return {
+            // `until` is genuinely optional - herdr then matches any settled
+            // state - so this must NOT be forced through `need`.
             agent: await client.agentWait(need(args.target, "target", tool, "wait"), {
-              status: need(args.status, "status", tool, "wait"),
+              status: args.until,
               timeoutMs: args.timeoutMs,
             }),
-            hint: "status reached; herdr_agent{action:'read'} to see what it produced",
+            hint: "state reached; herdr_agent{action:'read'} to see what it produced",
           };
         case "explain":
           return { explain: await client.agentExplain(need(args.target, "target", tool, "explain")) };
@@ -177,7 +200,7 @@ export function registerCuratedTools(server: McpServer, client: HerdrClient): vo
     description:
       "Pane layout and command execution. Actions:\n" +
       "- list: all panes, or one workspace's (optional workspaceId). get: one pane (paneId).\n" +
-      "- run: type a command into a pane WITH Enter (paneId, command). This is the one that actually executes - herdr_agent{action:'send'} does not press Enter.\n" +
+      "- run: type a SHELL command into a pane WITH Enter (paneId, command) - for shell panes. To ask an agent something, use herdr_agent{action:'prompt'} instead.\n" +
       "- close: close a pane (paneId). rename: label a pane, or clear:true (paneId, then name or clear).\n" +
       "- focus: herdr moves focus DIRECTIONALLY and cannot focus a pane by id - pass direction (left/right/up/down), optionally paneId to anchor the move (defaults to the current pane). To surface a specific agent use herdr_agent{action:'focus'} instead.\n" +
       "- split: split a pane (splitDirection right/down; optional paneId/ratio/cwd/env/focus).\n" +

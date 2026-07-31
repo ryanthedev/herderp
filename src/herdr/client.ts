@@ -209,18 +209,49 @@ async function spawnHerdr(runner: HerdrRunner, argv: string[]): Promise<HerdrRun
   }
 }
 
-/** Throws a typed HerdrError for a nonzero exit (JSON `{"error":...}` body,
- * verbatim; otherwise stderr/stdout text); no-op on exit 0. Shared so both
- * `runHerdr` and `runHerdrVoid` normalize command failure identically. */
+/**
+ * Finds herdr's `{"error":{code,message}}` envelope on whichever stream
+ * carries it, stderr first.
+ *
+ * That order is not a guess. A survey of every failing subcommand this client
+ * issues, run against herdr 0.7.5, found the envelope on STDERR every single
+ * time, with stdout empty - `agent get|read|explain|focus|rename`, `pane
+ * get|list|run|close|rename|focus|split|move`, `tab get|list|rename|focus|
+ * close`, `workspace get|focus|rename|close`, `worktree list|remove`, and
+ * `agent wait`'s timeout. Looking only at stdout (which is what this did
+ * until now) made every typed code - `agent_not_found`, `pane_not_found`,
+ * `workspace_not_found`, `tab_not_found`, `timeout` - unreachable: they all
+ * degraded to `command_failed` carrying the envelope as opaque text.
+ *
+ * Stdout is still checked, second, so the lookup does not depend on herdr's
+ * stream choice staying put. A stream that holds anything else contributes
+ * nothing and falls through to `command_failed` - verified shapes: `usage:
+ * herdr agent list` (exit 2), `unknown command: foo` (exit 2), and
+ * `Error: Custom { kind: Other, error: "invalid read format: json" }`
+ * (exit 1, plain text despite the nonzero-with-detail look).
+ */
+function findErrorEnvelope(outcome: HerdrRunResult): { code: string; message: string } | undefined {
+  for (const stream of [outcome.stderr, outcome.stdout]) {
+    const trimmed = stream.trim();
+    if (!trimmed) continue;
+    const parsed = tryParseJson(trimmed);
+    if (isErrorEnvelope(parsed)) return parsed.error;
+  }
+  return undefined;
+}
+
+/** Throws a typed HerdrError for a nonzero exit (herdr's own code when either
+ * stream carries the JSON `{"error":...}` envelope; otherwise stderr/stdout
+ * text as `command_failed`); no-op on exit 0. Shared so `runHerdr`,
+ * `runHerdrVoid` and `runHerdrRaw` normalize command failure identically. */
 function throwOnNonZeroExit(outcome: HerdrRunResult, argv: string[]): void {
   const { stdout, stderr, exitCode } = outcome;
   if (exitCode === 0) return;
-  const trimmedStdout = stdout.trim();
-  const parsed = trimmedStdout ? tryParseJson(trimmedStdout) : undefined;
-  if (isErrorEnvelope(parsed)) {
-    throw new HerdrError(parsed.error.code, parsed.error.message);
+  const envelope = findErrorEnvelope(outcome);
+  if (envelope) {
+    throw new HerdrError(envelope.code, envelope.message);
   }
-  const detail = stderr.trim() || trimmedStdout || `herdr exited with code ${exitCode}`;
+  const detail = stderr.trim() || stdout.trim() || `herdr exited with code ${exitCode}`;
   throw new HerdrError("command_failed", `herdr ${argv.join(" ")}: ${detail}`);
 }
 
@@ -229,7 +260,7 @@ function throwOnNonZeroExit(outcome: HerdrRunResult, argv: string[]): void {
  * HerdrError. Centralizes every failure mode so it's implemented (and
  * tested) once instead of once per public method:
  *   - the runner itself throwing (herdr never started)              -> "spawn_failed"
- *   - nonzero exit with a JSON `{"error":{code,message}}` body       -> that code, verbatim
+ *   - nonzero exit, JSON `{"error":{code,message}}` on EITHER stream -> that code, verbatim
  *   - nonzero exit with anything else (usage text, plain messages)   -> "command_failed"
  *   - exit 0 but stdout isn't parseable JSON (malformed/partial)     -> "invalid_response"
  */
@@ -269,12 +300,16 @@ async function runHerdrVoid(runner: HerdrRunner, argv: string[]): Promise<void> 
  * which has no `--json` flag on the command or globally). Routing it through
  * `runHerdr` made every read fail with `invalid_response`.
  *
- * Only the parse step is dropped; failure handling is unchanged, because
- * herdr's FAILURE output here IS the usual envelope - `agent read` on a
- * missing target exits 1 with `{"error":{"code":"agent_not_found",...}}`
- * (verified live), which `throwOnNonZeroExit` still turns into that exact
- * code. Stdout is returned verbatim: a snapshot's leading indentation and
- * trailing blank lines are content, so trimming would corrupt it.
+ * Only the parse step is dropped; failure handling is whatever
+ * `throwOnNonZeroExit` does, same as the other two runners. Verified live:
+ * `agent read` on a missing target exits 1 with stdout EMPTY and
+ * `{"error":{"code":"agent_not_found",...}}` on stderr, which
+ * `throwOnNonZeroExit` surfaces as `agent_not_found` now that it searches
+ * both streams. (It did not before - it read stdout only, so this same case
+ * came back as `command_failed`.)
+ *
+ * Stdout is returned verbatim: a snapshot's leading indentation and trailing
+ * blank lines are content, so trimming would corrupt it.
  */
 async function runHerdrRaw(runner: HerdrRunner, argv: string[]): Promise<string> {
   const outcome = await spawnHerdr(runner, argv);
@@ -487,11 +522,19 @@ export function createHerdrClient(runner: HerdrRunner = bunHerdrRunner): HerdrCl
         const parsed = await runHerdr(runner, argv);
         return mapAgent(unwrapResult(parsed, "agent", argv), argv);
       } catch (error) {
-        if (
-          error instanceof HerdrError &&
-          error.code === "command_failed" &&
-          /timed out/i.test(error.message)
-        ) {
+        if (!(error instanceof HerdrError)) throw error;
+        // Two shapes reach here, and both must land on `wait_timeout` - the
+        // client's own code for "the status never arrived", which callers
+        // branch on. Verified live against herdr 0.7.5: a real timeout exits 1
+        // with `{"error":{"code":"timeout","message":"timed out waiting for
+        // agent status"}}` on stderr, so once throwOnNonZeroExit searches
+        // stderr it arrives as herdr's `timeout`, not as `command_failed`.
+        // The plain-text branch is kept because it is what a herdr build that
+        // does not emit the envelope produces, and dropping it would silently
+        // un-fix the case this remap was written for.
+        const isEnvelopeTimeout = error.code === "timeout";
+        const isPlainTextTimeout = error.code === "command_failed" && /timed out/i.test(error.message);
+        if (isEnvelopeTimeout || isPlainTextTimeout) {
           throw new HerdrError("wait_timeout", error.message);
         }
         throw error;

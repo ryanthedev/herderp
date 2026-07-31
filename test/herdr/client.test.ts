@@ -258,15 +258,31 @@ describe("HerdrClient - DW-2.1 parse-success per method", () => {
     expect(calls).toEqual([["pane", "run", "w3:p1", "claude --resume 11111111-1111-1111-1111-111111111111"]]);
   });
 
-  it("DW_2_2_paneRun_nonzero_exit_with_no_json_still_raises_a_typed_command_failed_error", async () => {
-    const { runner } = stubRunner([fail(1, { stderr: "pane not found" })]);
+  it("DW_2_2_paneRun_nonzero_exit_surfaces_herdrs_pane_not_found_from_the_stderr_envelope", async () => {
+    // Verified live: `herdr pane run wZZ:pZZ true` -> exit 1, stdout EMPTY,
+    // `{"error":{"code":"pane_not_found",...},"id":"cli:request"}` on stderr.
+    // The void runner shares throwOnNonZeroExit, so it gets the typed code
+    // too - it is not a JSON-parsing method, but it is an erroring one.
+    const envelope = JSON.stringify({ error: { code: "pane_not_found", message: "pane wZZ:pZZ not found" }, id: "cli:request" });
+    const { runner } = stubRunner([fail(1, { stderr: `${envelope}\n` })]);
+    const client = createHerdrClient(runner);
+
+    const err = await client.paneRun("wZZ:pZZ", "echo hi").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HerdrError);
+    expect((err as HerdrError).code).toBe("pane_not_found");
+    expect((err as HerdrError).message).toBe("pane wZZ:pZZ not found");
+  });
+
+  it("DW_2_2_paneRun_nonzero_exit_with_no_envelope_still_raises_a_typed_command_failed_error", async () => {
+    const { runner } = stubRunner([fail(1, { stderr: "something went wrong" })]);
     const client = createHerdrClient(runner);
 
     const err = await client.paneRun("w9:p1", "echo hi").catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(HerdrError);
     expect((err as HerdrError).code).toBe("command_failed");
-    expect((err as HerdrError).message).toContain("pane not found");
+    expect((err as HerdrError).message).toContain("something went wrong");
   });
 
   it("DW_2_1_paneClose_spawns_pane_close_with_paneId", async () => {
@@ -392,9 +408,13 @@ describe("HerdrClient - DW-2.2/DW-2.4 error normalization (stubbed spawn, no liv
     expect((err as HerdrError).message).toContain("ENOENT");
   });
 
-  it("DW_2_2_nonzero_exit_with_json_error_body_normalizes_to_HerdrError_with_herdrs_own_code", async () => {
+  it("DW_2_2_nonzero_exit_with_json_error_body_on_stderr_normalizes_to_HerdrError_with_herdrs_own_code", async () => {
+    // Verified live against herdr 0.7.5: `herdr agent get wZZ:pZZ` exits 1
+    // with stdout EMPTY and this envelope on stderr. The previous version of
+    // this test stubbed it on stdout, which herdr never does - that fiction
+    // is why every typed code silently degraded to command_failed.
     const { runner } = stubRunner([
-      fail(1, { stdout: JSON.stringify({ error: { code: "agent_not_found", message: "agent target w3:p1 not found" }, id: "cli:agent:get" }) }),
+      fail(1, { stderr: `${JSON.stringify({ error: { code: "agent_not_found", message: "agent target w3:p1 not found" }, id: "cli:agent:get" })}\n` }),
     ]);
     const client = createHerdrClient(runner);
 
@@ -405,10 +425,26 @@ describe("HerdrClient - DW-2.2/DW-2.4 error normalization (stubbed spawn, no liv
     expect((err as HerdrError).message).toBe("agent target w3:p1 not found");
   });
 
+  it("DW_2_2_nonzero_exit_with_json_error_body_on_stdout_is_still_honoured", async () => {
+    // Forward-compat guard, NOT observed behaviour: herdr 0.7.5 puts the
+    // envelope on stderr. If a later build moves it to stdout, the lookup
+    // must keep surfacing herdr's code rather than regressing to the text.
+    const { runner } = stubRunner([
+      fail(1, { stdout: JSON.stringify({ error: { code: "pane_not_found", message: "pane w3:p1 not found" }, id: "cli:pane:get" }) }),
+    ]);
+    const client = createHerdrClient(runner);
+
+    const err = await client.paneGet("w3:p1").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HerdrError);
+    expect((err as HerdrError).code).toBe("pane_not_found");
+  });
+
   it("DW_2_2_nonzero_exit_with_plain_text_usage_error_normalizes_to_HerdrError_command_failed", async () => {
-    // Verified live: passing an unsupported flag/subcommand form produces
-    // plain-text `usage: ...` on exit 2, not JSON.
-    const { runner } = stubRunner([fail(2, { stdout: "usage: herdr agent list\n" })]);
+    // Verified live: `herdr agent list --bogus` -> exit 2, plain-text
+    // `usage: herdr agent list` on stderr, stdout empty. Widening the
+    // envelope lookup to stderr must NOT start treating this as an envelope.
+    const { runner } = stubRunner([fail(2, { stderr: "usage: herdr agent list\n" })]);
     const client = createHerdrClient(runner);
 
     const err = await client.agentList().catch((e: unknown) => e);
@@ -419,8 +455,8 @@ describe("HerdrClient - DW-2.2/DW-2.4 error normalization (stubbed spawn, no liv
   });
 
   it("DW_2_2_unknown_subcommand_plain_text_normalizes_to_HerdrError_not_a_raw_string_throw", async () => {
-    // Verified live: `herdr foo` -> exit 1, plain text "unknown command: foo".
-    const { runner } = stubRunner([fail(1, { stderr: "unknown command: foo\nrun 'herdr --help' for usage\n" })]);
+    // Verified live: `herdr foo` -> exit 2 (not 1), plain text on stderr.
+    const { runner } = stubRunner([fail(2, { stderr: "unknown command: foo\nrun 'herdr --help' for usage\n" })]);
     const client = createHerdrClient(runner);
 
     const err = await client.agentList().catch((e: unknown) => e);
@@ -428,6 +464,23 @@ describe("HerdrClient - DW-2.2/DW-2.4 error normalization (stubbed spawn, no liv
     expect(err).toBeInstanceOf(HerdrError);
     expect((err as HerdrError).code).toBe("command_failed");
     expect((err as HerdrError).message).toContain("unknown command: foo");
+  });
+
+  it("DW_2_2_nonzero_exit_with_non_envelope_json_free_text_stays_command_failed", async () => {
+    // Verified live: `herdr agent read <t> --format json` -> exit 1 with
+    // `Error: Custom { kind: Other, error: "invalid read format: json" }` on
+    // stderr. Nonzero + stderr detail, but not an envelope - must not be
+    // mistaken for one just because the lookup now reads stderr.
+    const { runner } = stubRunner([
+      fail(1, { stderr: 'Error: Custom { kind: Other, error: "invalid read format: json" }\n' }),
+    ]);
+    const client = createHerdrClient(runner);
+
+    const err = await client.agentRead("w3:p1").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HerdrError);
+    expect((err as HerdrError).code).toBe("command_failed");
+    expect((err as HerdrError).message).toContain("invalid read format");
   });
 
   it("DW_2_2_malformed_partial_stdout_on_exit_0_normalizes_to_HerdrError_invalid_response", async () => {
@@ -450,14 +503,11 @@ describe("HerdrClient - DW-2.2/DW-2.4 error normalization (stubbed spawn, no liv
     expect((err as HerdrError).code).toBe("invalid_response");
   });
 
-  it("DW_2_2_agentRead_raw_path_still_normalizes_a_nonzero_exit_to_HerdrError_command_failed", async () => {
+  it("DW_2_2_agentRead_raw_path_surfaces_herdrs_own_code_from_the_stderr_envelope", async () => {
     // Verified live against herdr 0.7.5: `herdr agent read wZZ:pZZ --lines 5`
-    // exits 1 with EMPTY stdout and this envelope on STDERR. Because
-    // throwOnNonZeroExit only looks for the envelope on stdout, that lands as
-    // command_failed carrying the envelope text - not as `agent_not_found`.
-    // That stream mismatch is pre-existing and repo-wide (`agent get` behaves
-    // identically), so it is out of scope here; this test pins what the raw
-    // path ACTUALLY does rather than what the envelope suggests it should.
+    // exits 1 with stdout EMPTY and this envelope on stderr. The raw path
+    // drops the SUCCESS parse only - the failure taxonomy is shared, so this
+    // must land on herdr's own code exactly as the JSON path does.
     const envelope = JSON.stringify({ error: { code: "agent_not_found", message: "agent target wZZ:pZZ not found" }, id: "cli:agent:read" });
     const { runner, calls } = stubRunner([fail(1, { stderr: `${envelope}\n` })]);
     const client = createHerdrClient(runner);
@@ -465,22 +515,6 @@ describe("HerdrClient - DW-2.2/DW-2.4 error normalization (stubbed spawn, no liv
     const err = await client.agentRead("wZZ:pZZ", { lines: 5 }).catch((e: unknown) => e);
 
     expect(calls).toEqual([["agent", "read", "wZZ:pZZ", "--lines", "5"]]);
-    expect(err).toBeInstanceOf(HerdrError);
-    expect((err as HerdrError).code).toBe("command_failed");
-    expect((err as HerdrError).message).toContain("agent target wZZ:pZZ not found");
-  });
-
-  it("DW_2_2_agentRead_raw_path_keeps_herdrs_own_code_when_the_envelope_is_on_stdout", async () => {
-    // Guards the taxonomy itself: if herdr ever moves the envelope to stdout,
-    // the raw path must still surface herdr's code verbatim, exactly as the
-    // JSON path does.
-    const { runner } = stubRunner([
-      fail(1, { stdout: JSON.stringify({ error: { code: "agent_not_found", message: "agent target wZZ:pZZ not found" }, id: "cli:agent:read" }) }),
-    ]);
-    const client = createHerdrClient(runner);
-
-    const err = await client.agentRead("wZZ:pZZ").catch((e: unknown) => e);
-
     expect(err).toBeInstanceOf(HerdrError);
     expect((err as HerdrError).code).toBe("agent_not_found");
     expect((err as HerdrError).message).toBe("agent target wZZ:pZZ not found");
@@ -518,16 +552,33 @@ describe("HerdrClient - DW-2.2/DW-2.4 error normalization (stubbed spawn, no liv
     expect(await client.agentRead("w3:p1")).toBe("");
   });
 
-  it("DW_2_2_agentWait_timeout_normalizes_to_HerdrError_wait_timeout_not_command_failed", async () => {
-    // Verified live: `herdr agent wait ... --timeout 200` on an agent whose
-    // status never changes -> exit 1, plain text "timed out waiting for
-    // agent status change" (not JSON).
-    const { runner, calls } = stubRunner([fail(1, { stderr: "timed out waiting for agent status change\n" })]);
+  it("DW_2_2_agentWait_timeout_envelope_normalizes_to_HerdrError_wait_timeout_not_herdrs_timeout", async () => {
+    // Verified live against herdr 0.7.5 by waiting on an idle agent for a
+    // status it never reaches: exit 1, stdout EMPTY, and this envelope on
+    // stderr. Widening the lookup to stderr means it now arrives as herdr's
+    // `timeout`, so the remap has to catch that code - otherwise this fix
+    // would silently make `wait_timeout` unreachable.
+    const envelope = JSON.stringify({ error: { code: "timeout", message: "timed out waiting for agent status" }, id: "cli:agent:wait" });
+    const { runner, calls } = stubRunner([fail(1, { stderr: `${envelope}\n` })]);
     const client = createHerdrClient(runner);
 
     const err = await client.agentWait("w3:p1", { status: "working", timeoutMs: 200 }).catch((e: unknown) => e);
 
     expect(calls).toEqual([["agent", "wait", "w3:p1", "--status", "working", "--timeout", "200"]]);
+    expect(err).toBeInstanceOf(HerdrError);
+    expect((err as HerdrError).code).toBe("wait_timeout");
+    expect((err as HerdrError).message).toBe("timed out waiting for agent status");
+  });
+
+  it("DW_2_2_agentWait_plain_text_timeout_without_an_envelope_is_still_wait_timeout", async () => {
+    // Fallback, not observed on 0.7.5: a herdr build that reports the timeout
+    // as plain text lands on command_failed, and the message sniff has to
+    // keep catching it.
+    const { runner } = stubRunner([fail(1, { stderr: "timed out waiting for agent status change\n" })]);
+    const client = createHerdrClient(runner);
+
+    const err = await client.agentWait("w3:p1", { status: "working" }).catch((e: unknown) => e);
+
     expect(err).toBeInstanceOf(HerdrError);
     expect((err as HerdrError).code).toBe("wait_timeout");
   });
@@ -543,13 +594,27 @@ describe("HerdrClient - DW-2.2/DW-2.4 error normalization (stubbed spawn, no liv
   });
 
   it("DW_2_2_agentWait_non_timeout_command_failure_stays_command_failed", async () => {
-    const { runner } = stubRunner([fail(2, { stdout: "usage: herdr agent wait\n" })]);
+    // Verified live: herdr 0.7.5 rejects this client's `--status` spelling
+    // with `unknown option: --status` on stderr at exit 2 (see the known-gaps
+    // note on agentWait). A usage failure must not be read as a timeout.
+    const { runner } = stubRunner([fail(2, { stderr: "unknown option: --status\n" })]);
     const client = createHerdrClient(runner);
 
     const err = await client.agentWait("w3:p1", { status: "working" }).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(HerdrError);
     expect((err as HerdrError).code).toBe("command_failed");
+  });
+
+  it("DW_2_2_a_nonzero_exit_with_a_non_timeout_envelope_keeps_herdrs_code_through_agentWait", async () => {
+    const envelope = JSON.stringify({ error: { code: "agent_not_found", message: "agent target w3:p1 not found" }, id: "cli:agent:wait" });
+    const { runner } = stubRunner([fail(1, { stderr: `${envelope}\n` })]);
+    const client = createHerdrClient(runner);
+
+    const err = await client.agentWait("w3:p1", { status: "working" }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HerdrError);
+    expect((err as HerdrError).code).toBe("agent_not_found");
   });
 });
 

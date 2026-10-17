@@ -99,6 +99,18 @@ describe("HerdrClient - DW-2.1 parse-success per method", () => {
     expect(text).toBe(RAW_SNAPSHOT);
   });
 
+  it("agentRead unwraps herdr 0.7.3's JSON envelope but leaves JSON-looking pane content alone", async () => {
+    // Seen live on a remote 0.7.3 host: the snapshot arrives as
+    // {id,result:{read:{text}}} where 0.7.5 prints it bare.
+    const envelope = JSON.stringify({ id: "cli:agent:read", result: { read: { format: "text", pane_id: "w3:p1", text: RAW_SNAPSHOT } } });
+    const { runner } = stubRunner([ok(`${envelope}\n`), ok('{"result":{"other":1}}\n')]);
+    const client = createHerdrClient(runner);
+
+    expect(await client.agentRead("w3:p1")).toBe(RAW_SNAPSHOT);
+    // A pane that happens to be showing JSON of some other shape is content.
+    expect(await client.agentRead("w3:p1")).toBe('{"result":{"other":1}}\n');
+  });
+
   it("DW_2_1_agentRead_returns_the_snapshot_verbatim_without_trimming", async () => {
     const { runner } = stubRunner([ok("  indented\n\n")]);
     const client = createHerdrClient(runner);

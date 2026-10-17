@@ -29,7 +29,9 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerTool } from "../registry.js";
+import type { ToolArgs, ToolInputShape, ToolResult } from "../registry.js";
 import type { HerdrClient } from "../herdr/client.js";
+import type { ClientResolver } from "../herdr/hosts.js";
 import type { AgentKind, AgentReadSource } from "../herdr/types.js";
 
 /** `--until` on both `agent wait` and `agent prompt`. Verbatim from herdr
@@ -87,9 +89,42 @@ function ok(hint: string, data?: Record<string, unknown>): Record<string, unknow
   return { ok: true, ...data, hint };
 }
 
-/** Registers the curated herdr tools on `server`, backed by `client`. */
-export function registerCuratedTools(server: McpServer, client: HerdrClient): void {
-  registerTool(server, {
+/** Appended to every curated tool's description: the one field they all
+ * share. Named hosts come from the registry behind `herdr_host`. */
+const HOST_DOC =
+  "\nOptional `host`: the name of a registered remote machine (see herdr_host) to run this against " +
+  "instead of this machine's herdr server. Omit it, or pass 'local', for the local server.";
+
+/**
+ * Registers the curated herdr tools on `server`. Each call resolves its
+ * HerdrClient through `clients` from the optional `host` argument, so one
+ * registration serves the local server and every registered remote alike.
+ */
+export function registerCuratedTools(server: McpServer, clients: ClientResolver): void {
+  const hostSchema = { host: z.string().optional() };
+  /** Wraps a per-resource definition: resolves the client for `args.host`
+   * and stamps the host onto object results so a remote answer is never
+   * mistaken for a local one. */
+  function registerHosted<Shape extends ToolInputShape>(definition: {
+    name: string;
+    description: string;
+    inputSchema: Shape;
+    handler: (client: HerdrClient, args: ToolArgs<Shape & typeof hostSchema>) => Promise<ToolResult>;
+  }): void {
+    registerTool(server, {
+      name: definition.name,
+      description: definition.description + HOST_DOC,
+      inputSchema: { ...definition.inputSchema, ...hostSchema },
+      handler: async (args) => {
+        const client = await clients.clientFor(args.host);
+        const result = await definition.handler(client, args);
+        if (typeof result === "string" || args.host === undefined) return result;
+        return { host: args.host, ...result };
+      },
+    });
+  }
+
+  registerHosted({
     name: "herdr_agent",
     description:
       "Inspect and control the coding agents running in herdr panes. One tool, many actions - pick with `action`:\n" +
@@ -121,7 +156,7 @@ export function registerCuratedTools(server: McpServer, client: HerdrClient): vo
       paneId: z.string().optional(),
       argv: z.array(z.string()).optional(),
     },
-    handler: async (args) => {
+    handler: async (client, args) => {
       const tool = "herdr_agent";
       switch (args.action) {
         case "list":
@@ -199,7 +234,7 @@ export function registerCuratedTools(server: McpServer, client: HerdrClient): vo
     },
   });
 
-  registerTool(server, {
+  registerHosted({
     name: "herdr_pane",
     description:
       "Pane layout and command execution. Actions:\n" +
@@ -230,7 +265,7 @@ export function registerCuratedTools(server: McpServer, client: HerdrClient): vo
       label: z.string().optional(),
       tabLabel: z.string().optional(),
     },
-    handler: async (args) => {
+    handler: async (client, args) => {
       const tool = "herdr_pane";
       switch (args.action) {
         case "list":
@@ -291,7 +326,7 @@ export function registerCuratedTools(server: McpServer, client: HerdrClient): vo
     },
   });
 
-  registerTool(server, {
+  registerHosted({
     name: "herdr_tab",
     description:
       "Tabs within a workspace. Actions: list (optional workspaceId), get (tabId), create (optional " +
@@ -307,7 +342,7 @@ export function registerCuratedTools(server: McpServer, client: HerdrClient): vo
       label: z.string().optional(),
       focus: z.boolean().optional(),
     },
-    handler: async (args) => {
+    handler: async (client, args) => {
       const tool = "herdr_tab";
       switch (args.action) {
         case "list":
@@ -342,7 +377,7 @@ export function registerCuratedTools(server: McpServer, client: HerdrClient): vo
     },
   });
 
-  registerTool(server, {
+  registerHosted({
     name: "herdr_workspace",
     description:
       "Workspaces (the top-level container, one per project cwd in normal use). Actions: list, get " +
@@ -357,7 +392,7 @@ export function registerCuratedTools(server: McpServer, client: HerdrClient): vo
       label: z.string().optional(),
       focus: z.boolean().optional(),
     },
-    handler: async (args) => {
+    handler: async (client, args) => {
       const tool = "herdr_workspace";
       switch (args.action) {
         case "list":
@@ -391,7 +426,7 @@ export function registerCuratedTools(server: McpServer, client: HerdrClient): vo
     },
   });
 
-  registerTool(server, {
+  registerHosted({
     name: "herdr_worktree",
     description:
       "Git worktrees, as herdr manages them. Actions: list, create (optional branch/base/path/label/focus), " +
@@ -410,7 +445,7 @@ export function registerCuratedTools(server: McpServer, client: HerdrClient): vo
       focus: z.boolean().optional(),
       force: z.boolean().optional(),
     },
-    handler: async (args) => {
+    handler: async (client, args) => {
       const tool = "herdr_worktree";
       const scope = { workspaceId: args.workspaceId, cwd: args.cwd };
       const unscoped = args.workspaceId === undefined && args.cwd === undefined;
@@ -451,13 +486,13 @@ export function registerCuratedTools(server: McpServer, client: HerdrClient): vo
   // Left as a plain single-purpose tool: `session attach` is interactive
   // (deliberately unexposed), so list is the only action - an `action` param
   // with exactly one legal value would be pure ceremony.
-  registerTool(server, {
+  registerHosted({
     name: "herdr_session_list",
     description:
       "Lists herdr's named persistent server sessions (the layer that owns workspaces), marking the default " +
       "and which are running. This is herdr's OWN session concept - not Claude Code agent sessions. For " +
       "those, use the necromancy_* tools.",
     inputSchema: {},
-    handler: async () => ({ sessions: await client.sessionList() }),
+    handler: async (client) => ({ sessions: await client.sessionList() }),
   });
 }

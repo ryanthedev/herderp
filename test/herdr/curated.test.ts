@@ -107,7 +107,7 @@ function registeredTools(server: McpServer): Record<string, RegisteredTool> {
 
 function withTools(overrides: Partial<HerdrClient> = {}): Record<string, RegisteredTool> {
   const server = new McpServer({ name: "test", version: "0.0.0" });
-  registerCuratedTools(server, stubClient(overrides));
+  registerCuratedTools(server, { clientFor: async () => stubClient(overrides) });
   return registeredTools(server);
 }
 
@@ -435,5 +435,61 @@ describe("registerCuratedTools - resource+action tool surface", () => {
   it("herdr_session_list returns typed sessions and stays a plain single-purpose tool", async () => {
     const { body } = await call(withTools(), "herdr_session_list", {});
     expect(body).toEqual({ sessions: [STUB_SESSION as unknown as Record<string, unknown>] });
+  });
+});
+
+describe("host routing", () => {
+  /** A resolver that records which host each call asked for and hands back
+   * a distinguishable client per host. */
+  function withRouting() {
+    const asked: Array<string | undefined> = [];
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerCuratedTools(server, {
+      clientFor: async (host) => {
+        asked.push(host);
+        return stubClient({
+          agentList: async () => [{ ...STUB_AGENT, cwd: host === undefined ? "/local" : `/remote/${host}` }],
+        });
+      },
+    });
+    return { tools: registeredTools(server), asked };
+  }
+
+  it("every curated tool accepts an optional host and documents it", () => {
+    const tools = withTools();
+    for (const name of EXPECTED_TOOL_NAMES) {
+      // The SDK wraps the raw shape in a ZodObject; its keys live on `.shape`.
+      const schema = tools[name]!.inputSchema as { shape: Record<string, unknown> };
+      expect(Object.keys(schema.shape)).toContain("host");
+      expect(tools[name]!.description).toContain("herdr_host");
+    }
+  });
+
+  it("omitting host resolves the local client and does not stamp a host on the result", async () => {
+    const { tools, asked } = withRouting();
+    const { body } = await call(tools, "herdr_agent", { action: "list" });
+    expect(asked).toEqual([undefined]);
+    expect((body.agents as Array<{ cwd: string }>)[0]!.cwd).toBe("/local");
+    expect(body.host).toBeUndefined();
+  });
+
+  it("passing host resolves that host's client and stamps the host on the result", async () => {
+    const { tools, asked } = withRouting();
+    const { body } = await call(tools, "herdr_agent", { action: "list", host: "ska" });
+    expect(asked).toEqual(["ska"]);
+    expect((body.agents as Array<{ cwd: string }>)[0]!.cwd).toBe("/remote/ska");
+    expect(body.host).toBe("ska");
+  });
+
+  it("a resolver failure (unknown host) surfaces as an isError result carrying its code", async () => {
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerCuratedTools(server, {
+      clientFor: async (host) => {
+        throw new HerdrError("unknown_host", `unknown host "${host}"`);
+      },
+    });
+    const { isError, text } = await call(registeredTools(server), "herdr_pane", { action: "list", host: "nope" });
+    expect(isError).toBe(true);
+    expect(text).toBe('[unknown_host] unknown host "nope"');
   });
 });

@@ -213,6 +213,10 @@ async function spawnHerdr(runner: HerdrRunner, argv: string[]): Promise<HerdrRun
   try {
     return await runner(argv);
   } catch (cause) {
+    // A runner that already classified its failure (the ssh runner in
+    // hosts.ts throws `host_unreachable`) keeps its code; only an untyped
+    // throw means "herdr never started".
+    if (cause instanceof HerdrError) throw cause;
     throw new HerdrError(
       "spawn_failed",
       `failed to launch herdr ${argv.join(" ")}: ${errorMessage(cause)}`,
@@ -527,7 +531,16 @@ export function createHerdrClient(runner: HerdrRunner = bunHerdrRunner): HerdrCl
     },
 
     async agentRead(target, opts) {
-      return runHerdrRaw(runner, ["agent", "read", target, ...agentReadFlags(opts)]);
+      const stdout = await runHerdrRaw(runner, ["agent", "read", target, ...agentReadFlags(opts)]);
+      // herdr 0.7.3 (seen live on a remote host) wraps the snapshot in a
+      // `{id,result:{read:{text}}}` envelope where 0.7.5 prints it bare.
+      // Unwrap when that exact shape is present; anything else is content.
+      const parsed = tryParseJson(stdout.trim());
+      if (isRecord(parsed) && isRecord(parsed.result) && isRecord(parsed.result.read)) {
+        const text = parsed.result.read.text;
+        if (typeof text === "string") return text;
+      }
+      return stdout;
     },
 
     async agentWait(target, { status, timeoutMs } = {}) {

@@ -10,6 +10,7 @@ A Claude Code plugin: a stdio **MCP server** wrapping the [`herdr`](https://gith
   - `herdr_tab` and `herdr_workspace` — `list`/`get`/`create`/`rename`/`focus`/`close`.
   - `herdr_worktree` — `list`/`create`/`open`/`remove`.
   - `herdr_session_list` — herdr's own named server sessions (not Claude Code sessions).
+  - `herdr_host` — `list`/`add`/`remove`/`check` the **named remote hosts** every tool above accepts via an optional `host` field (see below).
 
   Every result carries a `hint` naming the natural next call, and a missing field is rejected by name (`herdr_agent{action:"get"} requires "target"`) rather than falling through to herdr's usage text. herdr's own integration plumbing (`pane report-agent`/`report-metadata`/`release-agent`) and the interactive `agent attach --takeover` are deliberately not exposed.
 - **Necromancy** — point at a space (a herdr workspace id, label, project cwd, session name, or nothing) and:
@@ -22,6 +23,32 @@ A Claude Code plugin: a stdio **MCP server** wrapping the [`herdr`](https://gith
 - **`necromancy` skill** — drives the find-a-space → list → outline → search → read flow conversationally.
 - **`/herderp:ghost` command** — a one-shot catch-up: reads the previous session, or point it at an agent/space name and/or a session id to read a specific one. Get a plain summary of what it did and where it stopped, plus resume questions. Reading only — it never revives.
 
+## Remote hosts
+
+Every `herdr_*` tool takes an optional `host`. Omit it for this machine's herdr server; name a registered host to drive the herdr server on another machine instead — `herdr_agent{action:"prompt", target:"w6:p2E", text:"...", host:"ska"}` asks an agent on `ska`. The necromancy tools read this machine's session files and take no host.
+
+Hosts live in `~/.config/herderp/hosts.json` (override with `HERDERP_HOSTS_PATH`), which `herdr_host{action:"add"}` writes for you and which is re-read on every call, so edits need no restart:
+
+```json
+{
+  "hosts": {
+    "ska": {
+      "ssh": "100.64.0.10",
+      "user": "jane.doe@corp.example",
+      "herdr": "/opt/homebrew/bin/herdr"
+    },
+    "box": "me@box.example"
+  }
+}
+```
+
+- `ssh` is the destination as `ssh` takes it: a hostname, IP, `user@host`, or a `~/.ssh/config` alias. The string shorthand is just `{ "ssh": ... }`.
+- `user` (optional) is passed as `ssh -l`; use it for account names containing `@`, which `user@host` would mis-split.
+- `herdr` (optional) is the remote binary when it is not on ssh's non-interactive `PATH`. `~/.local/bin` and `/opt/homebrew/bin` are searched by default.
+- `socket` (optional) selects a non-default remote server session via `HERDR_SOCKET_PATH`.
+
+Each call is one `ssh` exec of the **remote machine's own** `herdr` binary, so the two herdr versions need not match and nothing long-lived has to be babysat. ssh runs in `BatchMode` (it will never prompt — keys or Tailscale SSH must already work; run `herdr_host{action:"check"}` once after adding a host to prove it) and accepts a new host key on first contact. herdr's exit status travels in-band, because Tailscale SSH reports exit 0 regardless of what the remote command returned. ssh's own failures come back as `[host_unreachable]`, an unregistered name as `[unknown_host]` naming the known hosts.
+
 ## How reading works
 
 Claude sessions persist on disk at `~/.claude/projects/<cwd-slug>/<uuid>.jsonl` independent of herdr pane life (the slug maps **every** non-alphanumeric character in the cwd to `-` — `/`, `.`, `_`, `@` and the rest — without collapsing runs, so `prod-_x` becomes `prod--x`). Necromancy enumerates them from disk and reads their turns in place — no pane, no relaunch. The reader parses the raw jsonl, skips empty/oversized/malformed files by `stat` alone, and validates every session id against a strict UUID regex before touching the filesystem.
@@ -30,6 +57,7 @@ Claude sessions persist on disk at `~/.claude/projects/<cwd-slug>/<uuid>.jsonl` 
 
 - [`bun`](https://bun.sh) on `PATH` (the server runs under bun; dependencies auto-install on first launch — no `bun install` needed).
 - A running `herdr` server and the Claude Code session store at `~/.claude/projects`. Both degrade gracefully with a clear message if absent.
+- For remote hosts: `ssh` on `PATH` and non-interactive access to each host (keys or Tailscale SSH).
 
 ## Install
 

@@ -48,7 +48,6 @@ Run `echo "$CLAUDE_CODE_SESSION_ID $HERDR_WORKSPACE_ID"` in Bash first. Pass the
   | `nextOffset` | The outline has more entries | Page forward if you need them. |
   | `omitted` (anchors, digest) | Older items were dropped | Don't treat the list as the whole story. |
   | `scanTruncated` (search_all) | Older sessions were never opened | "No hits" is not proof it didn't happen. Narrow with `cwd`. |
-  | `total` (digest) | Can overcount by headless runs that weren't read | Treat it as an upper bound. |
 
   Never say "here's the whole session" when a cap cut what came back.
 - **herdr down:** `necromancy_resolve` fails with a typed error; fall back to disk. `find_spaces` and `list_sessions` still list everything with `degraded: true`, and labels, live status, and handles are unknown, so say that. `digest`, `search_all`, `anchors`, and the readers never touch herdr.

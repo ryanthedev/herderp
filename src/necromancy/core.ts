@@ -240,12 +240,13 @@ export interface SessionDigestEntry {
 export interface SessionDigestResult {
   cwd: string;
   sessions: SessionDigestEntry[];
-  /** Sessions eligible for the digest (excluding the current one and, unless
-   * includeHeadless, headless runs). */
+  /** Sessions eligible for the digest: readable, holding at least one
+   * message, not the current one, and - unless includeHeadless - not headless
+   * runs. Exact, not an estimate. */
   total: number;
-  /** True when older eligible sessions exist beyond `n`. */
+  /** True when eligible sessions exist beyond the `n` returned. */
   truncated: boolean;
-  /** Headless runs left out of the digest (0 when includeHeadless is set). */
+  /** Headless runs in the space left out of the digest (0 with includeHeadless). */
   headlessSkipped: number;
 }
 
@@ -895,24 +896,30 @@ export function createNecromancy(options: NecromancyOptions) {
       (file) => withinSizeGate(file) && file.id !== currentSessionId,
     );
 
-    // Whether a session is headless is only known after reading it, so the
-    // eligible count is exact for every file read and the unread remainder is
-    // counted as eligible: `total` may overcount by headless runs in the
-    // unread tail, never undercount, and `truncated` stays truthful.
+    // Eligibility (readable, well-formed, headless or not) is only known after
+    // reading a file, so every file in the space is classified - that is what
+    // keeps `total`/`truncated` exact - but only the newest `n` eligible ones
+    // pay for turn parsing and anchor extraction. A whole machine's history
+    // reads in under a second, so one space is cheap.
     const sessions: SessionDigestEntry[] = [];
+    let eligible = 0;
     let headlessSkipped = 0;
-    let read = 0;
     for (const file of files) {
-      if (sessions.length >= n) break;
       const text = await readSessionText(file.path);
-      read += 1;
       if (text === null) continue; // deleted mid-scan: skip
-      const entrypoint = parseSessionPreview(text)?.entrypoint;
+      const preview = parseSessionPreview(text);
+      if (!preview) continue; // malformed jsonl: skip, never a digest slot (as in listSessions)
+      // No user/assistant record at all (e.g. a title-only stub a headless
+      // probe leaves behind) is not a session anyone did work in.
+      if (preview.messageCount === 0) continue;
+      const { entrypoint } = preview;
       const headless = entrypoint !== undefined && entrypoint !== "cli";
       if (headless && !includeHeadless) {
         headlessSkipped += 1;
         continue;
       }
+      eligible += 1;
+      if (sessions.length >= n) continue;
       const turns = parseTurns(text);
       const { ask, lastState, omitted, ...lists } = extractAnchors(turns);
       const anchors = { omitted: { ...omitted } } as SessionDigestEntry["anchors"];
@@ -934,8 +941,7 @@ export function createNecromancy(options: NecromancyOptions) {
         ...(headless ? { entrypoint } : {}),
       });
     }
-    const unread = files.length - read;
-    return { cwd, sessions, total: sessions.length + unread, truncated: unread > 0, headlessSkipped };
+    return { cwd, sessions, total: eligible, truncated: eligible > sessions.length, headlessSkipped };
   }
 
   return {

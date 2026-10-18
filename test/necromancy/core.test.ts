@@ -832,6 +832,41 @@ describe("necromancy core (fixture FS + stub client)", () => {
       expect(entry!.anchors.omitted.prs).toBe(4); // 9 distinct PRs (#100 + 1..8), 5 kept
     });
 
+    it("skips a malformed transcript instead of letting it take a digest slot", async () => {
+      const dir = await makeSpace(cwd);
+      await writeSession(dir, U1, workSession("real work", 1), at("2026-10-01T00:00:00Z"));
+      await writeSession(dir, U2, "not json at all\n{also broken\n", at("2026-10-02T00:00:00Z"));
+
+      const r = await necromancy({ client: stubClient() }).sessionDigest({ cwd, n: 1 });
+
+      expect(r.sessions.map((e) => e.sessionId)).toEqual([U1]);
+      expect(r).toMatchObject({ total: 1, truncated: false });
+    });
+
+    it("ignores title-only stubs that hold no conversation", async () => {
+      const dir = await makeSpace(cwd);
+      await writeSession(dir, U1, workSession("real work", 1), at("2026-10-01T00:00:00Z"));
+      await writeSession(dir, U2, jl({ type: "ai-title", aiTitle: "Probe", sessionId: U2 }), at("2026-10-02T00:00:00Z"));
+
+      const r = await necromancy({ client: stubClient() }).sessionDigest({ cwd, n: 1 });
+
+      expect(r.sessions.map((e) => e.sessionId)).toEqual([U1]);
+      expect(r).toMatchObject({ total: 1, truncated: false });
+    });
+
+    it("does not report truncation when only headless runs remain past n", async () => {
+      const dir = await makeSpace(cwd);
+      const headless = jl({ type: "user", message: { content: "review" }, cwd, entrypoint: "sdk-py" });
+      await writeSession(dir, U1, headless, at("2026-10-01T00:00:00Z"));
+      await writeSession(dir, U2, headless, at("2026-10-02T00:00:00Z"));
+      await writeSession(dir, U3, workSession("real work", 1), at("2026-10-03T00:00:00Z"));
+
+      const r = await necromancy({ client: stubClient() }).sessionDigest({ cwd, n: 1 });
+
+      expect(r.sessions.map((e) => e.sessionId)).toEqual([U3]);
+      expect(r).toMatchObject({ total: 1, truncated: false, headlessSkipped: 2 });
+    });
+
     it("returns an empty digest for an unknown space", async () => {
       const core = necromancy({ client: stubClient() });
       expect(await core.sessionDigest({ cwd: "/tmp/nowhere" })).toEqual({

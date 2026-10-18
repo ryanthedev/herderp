@@ -24,9 +24,12 @@ describe("plugin manifest (.claude-plugin/plugin.json)", () => {
     expect(manifest.name).toMatch(/^[a-z0-9-]+$/);
   });
 
-  it("does not declare mcpServers inline (registered via sibling .mcp.json instead)", async () => {
-    const manifest = await Bun.file(path.join(ROOT, ".claude-plugin", "plugin.json")).json();
-    expect(manifest.mcpServers).toBeUndefined();
+  // Regression guard: a root .mcp.json doubles as *project* MCP config when
+  // Claude Code runs inside this repo, where ${CLAUDE_PLUGIN_ROOT} is unset,
+  // so the server failed to spawn ("Module not found") on every dev session.
+  // The server is declared inline in plugin.json instead.
+  it("has no root .mcp.json (it would load as broken project config in this repo)", async () => {
+    expect(await Bun.file(path.join(ROOT, ".mcp.json")).exists()).toBe(false);
   });
 
   // Regression guard: plugin.json's version silently lagged two releases
@@ -41,20 +44,20 @@ describe("plugin manifest (.claude-plugin/plugin.json)", () => {
   });
 });
 
-describe("MCP registration (.mcp.json)", () => {
-  it("DW_1_2_registers_the_derp_stdio_server_at_the_plugin_root", async () => {
-    const mcpConfig = await Bun.file(path.join(ROOT, ".mcp.json")).json();
-    expect(mcpConfig.mcpServers).toBeDefined();
+describe("MCP registration (plugin.json mcpServers)", () => {
+  it("DW_1_2_registers_the_derp_stdio_server_inline", async () => {
+    const manifest = await Bun.file(path.join(ROOT, ".claude-plugin", "plugin.json")).json();
+    expect(manifest.mcpServers).toBeDefined();
 
-    const derp = mcpConfig.mcpServers.derp;
+    const derp = manifest.mcpServers.derp;
     expect(derp).toBeDefined();
     expect(typeof derp.command).toBe("string");
     expect(Array.isArray(derp.args)).toBe(true);
   });
 
   it("uses ${CLAUDE_PLUGIN_ROOT} for the bundled server path, not a hardcoded path", async () => {
-    const mcpConfig = await Bun.file(path.join(ROOT, ".mcp.json")).json();
-    const derp = mcpConfig.mcpServers.derp;
+    const manifest = await Bun.file(path.join(ROOT, ".claude-plugin", "plugin.json")).json();
+    const derp = manifest.mcpServers.derp;
     const argsString = derp.args.join(" ");
     expect(argsString).toContain("${CLAUDE_PLUGIN_ROOT}");
     expect(argsString).not.toContain(ROOT);

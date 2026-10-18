@@ -1,7 +1,7 @@
 {
   "name": "herderp",
   "displayName": "herderp",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "MCP tools for the herdr CLI, plus session necromancy: find, read, and anchor-extract a previous Claude Code agent session from a herdr space.",
   "author": {
     "name": "r"
@@ -15,5 +15,14 @@
     "workspace"
   ],
   "repository": "https://github.com/ryanthedev/herderp",
-  "homepage": "https://github.com/ryanthedev/herderp"
+  "homepage": "https://github.com/ryanthedev/herderp",
+  "mcpServers": {
+    "derp": {
+      "command": "bun",
+      "args": [
+        "run",
+        "${CLAUDE_PLUGIN_ROOT}/src/server.ts"
+      ]
+    }
+  }
 }

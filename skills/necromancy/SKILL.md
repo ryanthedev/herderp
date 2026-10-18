@@ -40,7 +40,7 @@ Run `echo "$CLAUDE_CODE_SESSION_ID $HERDR_WORKSPACE_ID"` in Bash first. Pass the
 
 ## Be honest about caps and outages
 
-- **Everything is bounded; say when something was cut.**
+- **Most responses are bounded; say when something was cut.**
 
   | Signal | Meaning | What to do |
   |---|---|---|

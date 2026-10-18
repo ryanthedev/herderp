@@ -889,8 +889,8 @@ export function createNecromancy(options: NecromancyOptions) {
    * depth, without an outline-per-session fan-out. Disk only; no herdr call.
    */
   async function sessionDigest(options: SessionDigestOptions): Promise<SessionDigestResult> {
-    const { cwd, currentSessionId, includeHeadless = false } = options;
-    const n = Math.min(Math.max(1, options.n ?? DEFAULT_DIGEST_SESSIONS), MAX_DIGEST_SESSIONS);
+    // n passes through unclamped, like every core limit; the tool schema caps it at MAX_DIGEST_SESSIONS.
+    const { cwd, currentSessionId, includeHeadless = false, n = DEFAULT_DIGEST_SESSIONS } = options;
     const files = (await scanSessionFiles(join(projectsRoot, deriveSlug(cwd)))).filter(
       (file) => withinSizeGate(file) && file.id !== currentSessionId,
     );

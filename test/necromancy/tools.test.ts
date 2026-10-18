@@ -306,6 +306,17 @@ describe("registerNecromancyTools reader tools - DW-2.1", () => {
     expect(received).toEqual({ sessionId: STUB_SESSION.sessionId, cwd: "/tmp/proj", from: 0, toolResultChars: 500 });
   });
 
+  it("necromancy_digest_caps_n_at_the_tool_boundary", async () => {
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerNecromancyTools(server, stubNecromancy());
+    const schema = registeredTools(server).necromancy_digest!.inputSchema as unknown as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(schema.safeParse({ cwd: "/tmp/proj", n: 10 }).success).toBe(true);
+    expect(schema.safeParse({ cwd: "/tmp/proj", n: 11 }).success).toBe(false);
+    expect(schema.safeParse({ cwd: "/tmp/proj", n: 0 }).success).toBe(false);
+  });
+
   it("necromancy_digest_is_registered_and_passes_its_arguments_through", async () => {
     let received: unknown;
     const digest = { cwd: "/tmp/proj", sessions: [], total: 0, truncated: false, headlessSkipped: 0 };

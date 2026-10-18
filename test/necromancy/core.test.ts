@@ -832,9 +832,9 @@ describe("necromancy core (fixture FS + stub client)", () => {
       expect(entry!.anchors.omitted.prs).toBe(4); // 9 distinct PRs (#100 + 1..8), 5 kept
     });
 
-    it("returns an empty digest for an unknown space, clamping an oversized n instead of failing", async () => {
+    it("returns an empty digest for an unknown space", async () => {
       const core = necromancy({ client: stubClient() });
-      expect(await core.sessionDigest({ cwd: "/tmp/nowhere", n: 50 })).toEqual({
+      expect(await core.sessionDigest({ cwd: "/tmp/nowhere" })).toEqual({
         cwd: "/tmp/nowhere",
         sessions: [],
         total: 0,

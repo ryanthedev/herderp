@@ -1,50 +1,57 @@
 ---
 name: necromancy
-description: Finds, previews, and reads a past Claude Code session recorded on disk for a project or workspace ("space") — reading only (search, outline, verbatim turns), never reviving. Use when the user wants to find or look up a lost or previous Claude Code session or agent; asks what past Claude Code sessions exist for a project/workspace/cwd; wants to know what happened in a past session, catch up on prior work from an earlier session, see what a previous session tried or discussed, or search/read old session content. Reads Claude Code session files only. Not for sessions, crashes, or lost work from other coding agents, CLIs, or editors (aider, Cursor, Codex, etc.); recovering non-session artifacts such as git stashes, editor autosaves/swap files, or uncommitted changes; continuing work already in the current conversation; starting a brand-new Claude Code session; or general herdr workspace/pane/tab management with no session-reading intent (use the herderp MCP tools directly).
+description: Reads past Claude Code sessions on this machine to catch the user up — "what have we been doing in this project", "go through the recent sessions", "what did the last session do", "where did we discuss X", "did we already try Y". Digests a project's recent sessions in one call, searches session content across every project, resolves a herdr handle like upublish:1 to its live session, and reads any session's turns in place. Reading only; it never revives or relaunches a session. Not for other agents' or editors' sessions (Cursor, aider, Codex), editor autosaves/swap files or unsaved changes, git stashes or uncommitted work, how-to questions about `claude --resume`, continuing the current conversation, or herdr pane/tab/workspace management (use the herdr_* tools).
 ---
 
 # necromancy
 
-Read a Claude Code session the user has lost track of, in place — get up to speed on what it did without relaunching it. Eight MCP tools back this: `necromancy_resolve` (turn a herdr handle like `upublish:1` into an exact session), `necromancy_search_all` (find WHICH session mentions something, across spaces), `necromancy_find_spaces`, `necromancy_list_sessions` (resolve and enumerate sessions), `necromancy_anchors` (the deterministic "always grab" set), and `necromancy_outline`, `necromancy_search`, `necromancy_read` (the reading path) — this skill is the conversation that drives them in the right order and reads their results honestly.
+Catch the user up on prior Claude Code work by reading session transcripts in place (`~/.claude/projects/<slug>/<uuid>.jsonl`). Every tool is read-only. Pick the entry point by what the user knows, read only what matters, and be honest about every cap.
 
-## Reading a session (get up to speed on prior work)
+## 0. Know which session you are
 
-What's usually wanted is a past session's content — what was tried, what broke, what a stack trace said, which files were touched — read in place.
+Run `echo "$CLAUDE_CODE_SESSION_ID $HERDR_WORKSPACE_ID"` in Bash first. Pass the session id as `currentSessionId` and the workspace id as `workspaceId` wherever a tool takes them. Only the Bash value is current; the MCP server's own env is fixed at spawn and goes stale across `/clear` and resume. This is what keeps you from summarizing yourself.
 
-- **Trigger cues:** "what did that session do", "catch me up on the last session", "what did we try before for X", "did a past session already look at this", "find where session X discussed Y" — anything asking about a prior session's *content*.
+## 1. Pick the entry point
 
-**The loop:**
-0. **Establish identity from fresh Bash env.** Run `echo "$CLAUDE_CODE_SESSION_ID $HERDR_WORKSPACE_ID"` and thread the session id through as `currentSessionId` and the workspace id as `workspaceId`. Only the Bash value is current — the MCP server's own env is baked at spawn and drifts across `/clear`/resume, so never trust it to identify "the session I'm in". This is how a listing flags `current:true` and how you avoid summarizing yourself.
+| The user… | Call |
+|---|---|
+| wants recent work in a project: "catch me up", "what have we been doing", "go through the recent sessions", or names nothing | `necromancy_digest({ cwd, currentSessionId })`. Use the current project's cwd unless they named another project. |
+| knows **what** happened but not where: "the session where we fixed the flaky login test" | `necromancy_search_all({ query })`. Add `cwd` to stay in one project, `regex: true` for a pattern. |
+| gives a herdr handle: `upublish:1`, `:2`, or a bare `2` (= `:2`, a tab in the current space) | `necromancy_resolve({ handle, workspaceId, currentSessionId })`, then step 2. |
+| names a project but you don't know its exact cwd | `necromancy_find_spaces({ query: "<name>" })`, then `necromancy_digest` on the match. |
+| gives a session id (a UUID) | Read it directly (step 3) with the cwd it lives in. |
 
-1. **A `<space>:<n>` handle → resolve it directly.** When the target looks like a herdr agent address (`upublish:1` = workspace label `upublish`, tab labeled `1`), call `necromancy_resolve({ handle, workspaceId, currentSessionId })` first — it maps the handle to the exact live session in one shot (herdr numbers nothing in its agent list, so this is the only reliable path). `status:"resolved"` gives you `sessionId`+`cwd`; go to step 2. `ambiguous_*` carries `candidates` to present. `status:"not_found"` means no *live* tab addresses it — the session is likely **dead**, so fall through to listing (below) and pick the Nth session newest-first, skipping any `current:true`. Whichever rung answers, tell the user which, and echo the real `matchedTabLabel` when it differs from what they typed.
+- **Digest** returns the newest sessions, each with its ask, last state, and newest anchors. That's usually enough to answer a "what's been happening" question outright. Read in depth only the session(s) the answer hinges on.
+- **Choosing "the previous session":** skip `current` (that's you), and prefer sessions without `catchUp: true` (an earlier catch-up, not real work). Headless runs (automated SDK reviews and pipelines) are left out of the digest and counted in `headlessSkipped`. Pass `includeHeadless: true` only if the user asks about them.
+- **`find_spaces` matches:** zero means say "nothing matched '<name>'" and never guess a cwd. More than one means list them and ask. With no query it returns only the most recently active spaces (capped), not every project.
 
-**1b. The user knows WHAT happened but not WHERE → search content first, don't guess a space.** When the target is described by what was in it ("that session where we fixed the flaky login test", "when did we bump the version") and no cwd, handle, or session id is on offer, call `necromancy_search_all({ query })` — it searches session content across every space and answers with one entry per matching *session* (`cwd`, `sessionId`, `matchCount`, a snippet, `mtime`), newest first. That's `sessionId`+`cwd` in one hop; go to step 3. Add `cwd: <cwd>` to confine it to one project, `regex: true` for a pattern. It is bounded twice and both bounds must be reported honestly: `truncated` means more sessions matched than came back, and `scanTruncated` means the scan stopped after `scanned` files (newest first) — so older sessions were never looked at and "no hits" is *not* proof it didn't happen. Say which, and narrow with `cwd` rather than claiming the search was exhaustive.
+## 2. After `necromancy_resolve`
 
-2. **Otherwise resolve a target to a space.** The user may point at a space by workspace id, a label, a project cwd, something that names a session directly, or nothing at all.
-   - **`necromancy_find_spaces` lists every project on the machine (hundreds are normal), so never call it bare — it blows the tool-result token cap.** Two ways to stay bounded:
-     - If you already know the exact cwd — the **current project** — skip `find_spaces` and go straight to `necromancy_list_sessions({ cwd })`.
-     - Otherwise pass a `query`: `necromancy_find_spaces({ query: "<target>" })` returns just the matching spaces, newest-active first, with `total` and `truncated`.
-   - **No target given:** call `find_spaces` (no query) for the most-recently-active spaces (already capped), present them (cwd, label, session count, last activity), and ask which one. If `truncated` is true, say more exist and offer to narrow by name.
-   - **A target given:** run `find_spaces({ query: <target> })`; it has already matched `cwd`/`label`/`workspaceId` case-insensitively.
-     - **Zero matches:** say so plainly ("nothing matched '<target>'") and fall back to an unfiltered `find_spaces` page — never guess a cwd that wasn't returned.
-     - **One match:** proceed with that space's cwd.
-     - **More than one match:** list the matches and ask the user to pick — never silently choose the first one.
-   - If the target looks like it's naming a *session* directly (a UUID, or a description that only makes sense as a session, not a project) rather than a space, resolve whatever cwd you can and treat the target as a session filter once you have the list.
-   - Then call `necromancy_list_sessions({ cwd, currentSessionId })` and, unless a session was already named, present the sessions newest-first with their preview, message count, live status, and — for live sessions — their herdr `handle` (`upublish:1`), so the user can pick one. Each row carries its `sessionId` — that's the exact key step 3's `necromancy_anchors({ sessionId, cwd })` and the reading tools want, no renaming. This is also the answer to "list every past session in a space". A session flagged `current:true` is the one you're running in — mark it as such and never offer it as the target.
-3. **Grab the anchors** — call `necromancy_anchors({ sessionId, cwd })` before reading turns. It regex-extracts the load-bearing set (`ask`, `lastState`, `commits`, `prs`, `versions`, `files`, `errors`, `tests`, `decisions`) deterministically and cheaply, giving you a grounded checklist of what a summary must account for so nothing important is silently missed. It's evidence, not the summary — confirm and quote anchors via outline/search/read rather than reciting them.
-4. **Outline next**, not read first — call `necromancy_outline({ sessionId, cwd })` to see the shape of the session (role, tool name, a clipped preview per entry) before pulling any turn in full. Use `filter` (e.g. `tool_use`) to scan just the tool-call ledger when that's what's relevant.
-5. **Search when you have a keyword or symptom** — call `necromancy_search({ sessionId, cwd, query })` to jump straight to the turns that mention it, each result carrying the `index` needed to read it in full.
-6. **Read only the turns that matter** — call `necromancy_read({ sessionId, cwd, from, to })` with the specific index (or index range) an outline/search hit pointed at, rather than reading the whole session start to end.
+- `status: "resolved"`: if `isCurrent` is true, that is this very session. Say so and offer the previous one instead. Otherwise take `sessionId` + `cwd` to step 3. If `matchedTabLabel` differs from what the user typed, say which tab it matched.
+- `ambiguous_workspace` / `ambiguous_pane`: present the `candidates` and ask. Never pick one silently.
+- `not_found`: no live tab addresses it, so the session may be dead. If you know the space's cwd, `necromancy_digest` (or `necromancy_list_sessions`) shows its sessions newest first. With `reason: "workspace"` you have no cwd, so try `necromancy_find_spaces({ query: <label> })`. Tell the user the live lookup missed and that you fell back to disk. A herdr tab number and the Nth file on disk are unrelated, so never present an on-disk pick as "tab N".
 
-**Honor `truncated`/`nextOffset`/`degraded` honestly.** Every response is capped on both count and bytes. A `truncated: true` on `find_spaces` means more spaces matched than the page returned (`total` says how many) — narrow with a `query`, don't imply you saw them all. A `truncated: true` on search means more matched than were returned — narrow the query, don't assume you've seen every hit. A `scanTruncated: true` on `search_all` is stronger still: sessions older than the `scanned` newest were never opened, so report the search as partial instead of concluding it never happened. A `nextOffset` on outline means there are more entries — page forward if the summary you're building needs them. A `degraded: true` on `list_sessions` means herdr was unreachable, so `live`/`handle` couldn't be determined — the on-disk sessions are all there, but say live status is unknown rather than implying nothing is running. Never tell the user "here's the whole session" when a cap cut what came back; say what you actually saw and that more exists.
+## 3. Read one session
 
-## Degraded environments
+1. **`necromancy_anchors({ sessionId, cwd })`** gives the load-bearing facts: ask, last state, commits, PRs, versions, files, errors, tests, decisions. Each item is `{text, index}`, and every list keeps its newest items. A non-empty `omitted` means older items were dropped. Treat anchors as a checklist the summary must account for, and confirm the ones you rely on by reading their `index`.
+2. **`necromancy_outline({ sessionId, cwd, view: "spine" })`** lists just the user's asks and the assistant's prose. It's the cheapest way to see the story. Drop `view` (or use `filter: "tool_use"`) when the tool-call ledger matters.
+3. **`necromancy_search({ sessionId, cwd, query })`** jumps to the turns that mention a keyword or symptom.
+4. **`necromancy_read({ sessionId, cwd, from, to, toolResultChars: 500 })`** reads the turns that matter, with tool output clipped. Leave `toolResultChars` off only when one specific output (a stack trace, a test log) is the point.
 
-Both failure modes below are expected, recoverable states, not bugs — never let either surface as a raw tool error or stack trace.
+## Be honest about caps and outages
 
-- **herdr isn't running:** `necromancy_resolve` needs herdr and will fail with a clear, typed error — a handle can't be resolved without it, so fall back to listing. `necromancy_list_sessions` degrades instead of failing: it returns every on-disk session with `degraded:true` and `live` all false (handles unavailable) — use it and say live status is unknown. `necromancy_find_spaces` still lists spaces (herdr only enriches them). The reading tools (`necromancy_outline`/`necromancy_search`/`necromancy_read`) never call herdr and work regardless.
-- **No session history on this machine, or the given session doesn't exist:** the on-disk lookups (`necromancy_find_spaces`, `necromancy_list_sessions`) return empty lists (not errors) when `~/.claude/projects` doesn't exist; the reading tools instead surface a typed error for a missing/invalid session. Either way, tell the user plainly what wasn't found rather than implying something went wrong.
+- **Everything is bounded; say when something was cut.**
 
-## Scope (v1)
+  | Signal | Meaning | What to do |
+  |---|---|---|
+  | `truncated` | More matched than came back | Narrow the query. |
+  | `nextOffset` | The outline has more entries | Page forward if you need them. |
+  | `omitted` (anchors, digest) | Older items were dropped | Don't treat the list as the whole story. |
+  | `scanTruncated` (search_all) | Older sessions were never opened | "No hits" is not proof it didn't happen. Narrow with `cwd`. |
+  | `total` (digest) | Can overcount by headless runs that weren't read | Treat it as an upper bound. |
 
-Claude Code sessions only — no other agent CLI kind is supported yet.
+  Never say "here's the whole session" when a cap cut what came back.
+- **herdr down:** `necromancy_resolve` fails with a typed error; fall back to disk. `find_spaces` and `list_sessions` still list everything with `degraded: true`, and labels, live status, and handles are unknown, so say that. `digest`, `search_all`, `anchors`, and the readers never touch herdr.
+- **Nothing found:** an unknown space returns empty lists; a missing session returns `session_not_found`. Say plainly what wasn't found.
+
+Claude Code sessions only. No other agent CLI is supported.

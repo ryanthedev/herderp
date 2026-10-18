@@ -18,7 +18,7 @@
 // carries the turn `index` it came from, so it can be read in context with
 // one necromancy_read call.
 
-import type { Turn } from "./reader.js";
+import { userIntent, type Turn } from "./reader.js";
 
 /** One extracted fact and the turn it came from (a necromancy_read index). */
 export interface AnchorItem {
@@ -71,30 +71,10 @@ const ERROR_RE = /\b(?:error|exception|traceback|stack trace|panic|segfault|ENOE
 const TEST_RESULT_RE = /\b(?:\d+\s+(?:pass|passing|passed|fail|failing|failed)|Ran\s+\d+\s+tests?)\b[^\n"]*/gi;
 const DECISION_CUE_RE = /\b(?:let's|instead|actually|do not|don't|we should|i want|i'd like|make sure|can we|change (?:it|this|that) to|rename|remove the|no[,.]|scrap|drop the|use \w+ not)\b/i;
 
-// Harness-injected user records that carry no intent of the user's own.
-const BOILERPLATE_USER_RE = /^\s*(?:<local-command-|<system-reminder>|<task-notification>|\[Request interrupted)/;
-const COMMAND_NAME_RE = /<command-name>\s*([^<]*?)\s*<\/command-name>/;
-const COMMAND_ARGS_RE = /<command-args>([\s\S]*?)<\/command-args>/;
-
 /** Whitespace-collapsed, ellipsis-terminated at ANCHOR_CLIP_CHARS. */
 function clip(raw: string): string {
   const collapsed = raw.replace(/\s+/g, " ").trim();
   return collapsed.length <= ANCHOR_CLIP_CHARS ? collapsed : `${collapsed.slice(0, ANCHOR_CLIP_CHARS - 1)}…`;
-}
-
-/**
- * What a user turn actually asked, or null when it is harness boilerplate.
- * A slash-command invocation is recorded as `<command-name>` XML; it reads
- * back as the command line the user typed (`/herderp:ghost upublish:1`).
- */
-export function userIntent(text: string): string | null {
-  if (text.trim() === "" || BOILERPLATE_USER_RE.test(text)) return null;
-  const command = COMMAND_NAME_RE.exec(text);
-  if (command) {
-    const args = COMMAND_ARGS_RE.exec(text)?.[1]?.trim() ?? "";
-    return `${command[1]} ${args}`.trim();
-  }
-  return text;
 }
 
 /**

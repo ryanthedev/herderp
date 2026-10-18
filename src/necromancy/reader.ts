@@ -19,6 +19,13 @@
 
 export type TurnRole = "user" | "thinking" | "text" | "tool_use" | "tool_result";
 
+/** Outline views. `spine` is the conversation itself - the user's real asks
+ * and the assistant's prose - with thinking, tool calls, tool output, and
+ * harness boilerplate left out: the cheapest way to see what a session was
+ * about before reading any turn in full. */
+export const OUTLINE_VIEWS = ["all", "spine"] as const;
+export type OutlineView = (typeof OUTLINE_VIEWS)[number];
+
 /** One addressable content block. `tool` is set for tool_use/tool_result. */
 export interface Turn {
   index: number;
@@ -70,6 +77,45 @@ export const DEFAULT_MAX_READ_BYTES = 64 * 1024;
 export const DEFAULT_MAX_READ_SPAN = 200;
 
 const OUTLINE_CLIP_CHARS = 100;
+
+// Harness-injected user records that carry no intent of the user's own.
+const BOILERPLATE_USER_RE = /^\s*(?:<local-command-|<system-reminder>|<task-notification>|\[Request interrupted)/;
+// A slash-command record STARTS with its command markup; the same tags quoted
+// mid-text (a diff, a doc) are content, not an invocation.
+const COMMAND_RECORD_RE = /^\s*<command-(?:message|name)>/;
+const COMMAND_NAME_RE = /<command-name>\s*([^<]*?)\s*<\/command-name>/;
+const COMMAND_ARGS_RE = /<command-args>([\s\S]*?)<\/command-args>/;
+// Built-in Claude Code commands that drive the UI rather than state a task:
+// `/model` is never what a session set out to do.
+const UI_COMMANDS = new Set([
+  "add-dir", "agents", "bashes", "bug", "clear", "compact", "config", "context", "copy", "cost", "doctor", "effort",
+  "exit", "export", "fast", "feedback", "help", "hooks", "ide", "keybindings", "login", "logout", "mcp", "memory",
+  "model", "output-style", "permissions", "plugin", "privacy-settings", "release-notes", "rename", "resume",
+  "rewind", "status", "statusline", "terminal-setup", "theme", "todos", "upgrade", "usage", "vim",
+]);
+
+/**
+ * What a user turn actually asked, or null when it is harness boilerplate.
+ * A slash-command invocation is recorded as `<command-name>` XML; it reads
+ * back as the command line the user typed (`/herderp:ghost upublish:1`).
+ */
+export function userIntent(text: string): string | null {
+  if (text.trim() === "" || BOILERPLATE_USER_RE.test(text)) return null;
+  const command = COMMAND_RECORD_RE.test(text) ? COMMAND_NAME_RE.exec(text) : null;
+  if (command) {
+    const name = command[1]!;
+    if (UI_COMMANDS.has(name.replace(/^\//, ""))) return null;
+    const args = COMMAND_ARGS_RE.exec(text)?.[1]?.trim() ?? "";
+    return `${name} ${args}`.trim();
+  }
+  return text;
+}
+
+/** Whether a turn belongs to the `spine` view (see OUTLINE_VIEWS). */
+function onSpine(turn: Turn): boolean {
+  if (turn.role === "text") return true;
+  return turn.role === "user" && userIntent(turn.text) !== null;
+}
 const SNIPPET_CONTEXT_CHARS = 60;
 const SNIPPET_MAX_CHARS = 160;
 
@@ -190,12 +236,14 @@ export interface OutlineOptions {
   offset?: number;
   limit?: number;
   filter?: TurnRole;
+  /** `spine` keeps only real user asks + assistant prose. Combines with `filter`. */
+  view?: OutlineView;
 }
 
 /** One clipped line per entry, paged by offset/limit, optionally role-filtered. */
 export function outlineTurns(turns: Turn[], options: OutlineOptions = {}): OutlineResult {
-  const { offset = 0, limit = DEFAULT_MAX_OUTLINE_ENTRIES, filter } = options;
-  const filtered = filter ? turns.filter((turn) => turn.role === filter) : turns;
+  const { offset = 0, limit = DEFAULT_MAX_OUTLINE_ENTRIES, filter, view = "all" } = options;
+  const filtered = turns.filter((turn) => (!filter || turn.role === filter) && (view === "all" || onSpine(turn)));
   const start = Math.max(0, offset);
   const page = filtered.slice(start, start + Math.max(0, limit));
 
@@ -326,11 +374,15 @@ export interface ReadOptions {
   maxBytes?: number;
   /** Server-side span cap; not part of the plan's caller-facing shorthand but required to satisfy DW-1.4/DW-1.6 - see phase-1 discovery doc. */
   maxSpan?: number;
+  /** Clip each tool_result body to this many characters (tool_use inputs and
+   * prose stay verbatim). Tool output is most of a session's bytes and rarely
+   * what a catch-up needs, so this stretches maxBytes over many more turns. */
+  toolResultChars?: number;
 }
 
 /** Verbatim content of entries [from,to], span- and byte-capped. */
 export function readTurns(turns: Turn[], options: ReadOptions): ReadResult {
-  const { from, to = from, maxBytes = DEFAULT_MAX_READ_BYTES, maxSpan = DEFAULT_MAX_READ_SPAN } = options;
+  const { from, to = from, maxBytes = DEFAULT_MAX_READ_BYTES, maxSpan = DEFAULT_MAX_READ_SPAN, toolResultChars } = options;
 
   if (turns.length === 0 || to < from) return { entries: [], truncated: false };
 
@@ -345,7 +397,7 @@ export function readTurns(turns: Turn[], options: ReadOptions): ReadResult {
   let bytes = 0;
   let byteTruncated = false;
   for (let i = clampedFrom; i <= spanCappedTo; i++) {
-    const turn = turns[i]!;
+    const turn = clipToolResult(turns[i]!, toolResultChars);
     const remaining = maxBytes - bytes;
     if (remaining <= 0) {
       byteTruncated = true;
@@ -377,6 +429,12 @@ export function readTurns(turns: Turn[], options: ReadOptions): ReadResult {
   }
 
   return { entries, truncated: spanTruncated || byteTruncated };
+}
+
+/** A tool_result turn with its body clipped to `maxChars`, marked with how much was cut. */
+function clipToolResult(turn: Turn, maxChars: number | undefined): Turn {
+  if (maxChars === undefined || turn.role !== "tool_result" || turn.text.length <= maxChars) return turn;
+  return { ...turn, text: `${turn.text.slice(0, maxChars)}… [clipped: ${maxChars} of ${turn.text.length} chars]` };
 }
 
 /** Largest prefix of `text` whose UTF-8 byte length is <= `maxBytes`. */

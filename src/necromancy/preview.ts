@@ -15,6 +15,9 @@ const PREVIEW_MAX_CHARS = 120;
 export interface SessionPreview {
   preview: string;
   messageCount: number;
+  /** How the session was launched (`cli`, `sdk-py`, ...), from the first
+   * record that carries it; absent in older transcripts. */
+  entrypoint?: string;
 }
 
 export function parseSessionPreview(text: string): SessionPreview | null {
@@ -22,11 +25,15 @@ export function parseSessionPreview(text: string): SessionPreview | null {
   let summary: string | null = null;
   let firstUserText: string | null = null;
   let messageCount = 0;
+  let entrypoint: string | undefined;
 
   for (const line of text.split("\n")) {
     const record = parseRecord(line);
     if (!record) continue;
     sawRecord = true;
+    if (entrypoint === undefined && typeof record.entrypoint === "string" && record.entrypoint !== "") {
+      entrypoint = record.entrypoint;
+    }
     if (record.type === "summary" && typeof record.summary === "string" && summary === null) {
       summary = record.summary;
     }
@@ -37,7 +44,7 @@ export function parseSessionPreview(text: string): SessionPreview | null {
   }
 
   if (!sawRecord) return null;
-  return { preview: clip(summary ?? firstUserText ?? ""), messageCount };
+  return { preview: clip(summary ?? firstUserText ?? ""), messageCount, ...(entrypoint !== undefined && { entrypoint }) };
 }
 
 /** One trimmed jsonl line -> its object form, or null for empty/malformed/non-object lines. */

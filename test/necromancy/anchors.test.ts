@@ -12,7 +12,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { extractAnchors, MAX_ANCHORS_PER_CATEGORY, userIntent, type AnchorItem } from "../../src/necromancy/anchors.js";
+import { extractAnchors, MAX_ANCHORS_PER_CATEGORY, type AnchorItem } from "../../src/necromancy/anchors.js";
+import { userIntent } from "../../src/necromancy/reader.js";
 import { registerNecromancyTools } from "../../src/tools/necromancy.js";
 import { createNecromancy, deriveSlug, type Necromancy, type Turn } from "../../src/necromancy/core.js";
 import type { HerdrClient } from "../../src/herdr/client.js";
@@ -154,6 +155,16 @@ describe("extractAnchors - harness boilerplate is not the user's intent", () => 
       }),
     );
     expect(a.ask?.text).toBe("/herderp:ghost upublish:1");
+  });
+
+  it("treats command markup quoted mid-text (a diff, a doc) as content, not an invocation", () => {
+    const quoted = "Review this diff: + const RE = /<command-name>\\/herderp:ghost<\\/command-name>/;";
+    expect(userIntent(quoted)).toBe(quoted);
+  });
+
+  it("skips built-in UI commands like /model, which state no task", () => {
+    expect(userIntent("<command-name>/model</command-name>\n<command-args></command-args>")).toBeNull();
+    expect(userIntent("<command-name>/herderp:ghost</command-name>")).toBe("/herderp:ghost");
   });
 
   it("userIntent returns null for system reminders and interruptions", () => {

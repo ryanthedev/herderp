@@ -425,6 +425,14 @@ describe("outlineTurns - spine view", () => {
     expect(entries.map((e) => e.index)).toEqual([1]);
   });
 
+  it("renders a slash command's normalized intent as its spine preview", () => {
+    const turns: Turn[] = [
+      { index: 0, role: "user", text: "<command-message>herderp:ghost</command-message>\n<command-name>/herderp:ghost</command-name>\n<command-args>upublish:1</command-args>" },
+    ];
+    expect(outlineTurns(turns, { view: "spine" }).entries[0]!.preview).toBe("/herderp:ghost upublish:1");
+    expect(outlineTurns(turns).entries[0]!.preview).toContain("<command-message>"); // view all stays verbatim
+  });
+
   it("view all is the default and leaves everything in", () => {
     expect(outlineTurns(session).total).toBe(session.length);
   });

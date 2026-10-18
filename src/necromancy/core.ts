@@ -229,8 +229,9 @@ export interface SessionDigestEntry {
   lastState: AnchorItem | null;
   /** The newest few anchors per category; `omitted` counts the rest. */
   anchors: Pick<Anchors, "commits" | "prs" | "versions" | "files" | "errors" | "tests" | "decisions" | "omitted">;
-  /** Set when the session was itself a catch-up (it called necromancy tools) -
-   * usually not the work the user wants to resume. */
+  /** Set when the session looks like a catch-up only: it called necromancy
+   * tools and never edited a file. A hint, not a verdict - check its
+   * lastState/anchors before skipping it as "the previous session". */
   catchUp?: true;
   /** As on SessionInfo: present only for non-CLI launches (headless runs,
    * which appear only with includeHeadless). */
@@ -310,6 +311,8 @@ export const MAX_DIGEST_SESSIONS = 10;
 /** Anchors per category in a digest entry - a digest is for choosing, not reading. */
 const DIGEST_ANCHORS_PER_CATEGORY = 5;
 const NECROMANCY_TOOL_RE = /necromancy_/;
+/** Tools whose use means a session did work, not just reading. */
+const FILE_WRITE_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
 
 /** A UUID-named .jsonl session file found on disk (stat metadata only). */
 interface SessionFile {
@@ -929,7 +932,10 @@ export function createNecromancy(options: NecromancyOptions) {
         anchors[category] = items.slice(dropped);
         if (dropped > 0) anchors.omitted[category] = (anchors.omitted[category] ?? 0) + dropped;
       }
-      const catchUp = turns.some((turn) => turn.role === "tool_use" && NECROMANCY_TOOL_RE.test(turn.tool ?? ""));
+      const toolUses = turns.filter((turn) => turn.role === "tool_use");
+      const catchUp =
+        toolUses.some((turn) => NECROMANCY_TOOL_RE.test(turn.tool ?? "")) &&
+        !toolUses.some((turn) => FILE_WRITE_TOOLS.has(turn.tool ?? ""));
       sessions.push({
         sessionId: file.id,
         mtime: file.mtimeMs,

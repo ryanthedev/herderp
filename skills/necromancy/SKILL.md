@@ -22,7 +22,7 @@ Run `echo "$CLAUDE_CODE_SESSION_ID $HERDR_WORKSPACE_ID"` in Bash first. Pass the
 | gives a session id (a UUID) | Read it directly (step 3) with the cwd it lives in. |
 
 - **Digest** returns the newest sessions, each with its ask, last state, and newest anchors. That's usually enough to answer a "what's been happening" question outright. Read in depth only the session(s) the answer hinges on.
-- **Choosing "the previous session":** skip `current` (that's you), and prefer sessions without `catchUp: true` (an earlier catch-up, not real work). Headless runs (automated SDK reviews and pipelines) are left out of the digest and counted in `headlessSkipped`. Pass `includeHeadless: true` only if the user asks about them.
+- **Choosing "the previous session":** skip `current` (that's you), and treat `catchUp: true` as a hint that the session only caught up on others (it called necromancy tools and edited nothing). Check its `lastState` before passing over it. Headless runs (automated SDK reviews and pipelines) are left out of the digest and counted in `headlessSkipped`. Pass `includeHeadless: true` only if the user asks about them.
 - **`find_spaces` matches:** zero means say "nothing matched '<name>'" and never guess a cwd. More than one means list them and ask. With no query it returns only the most recently active spaces (capped), not every project.
 
 ## 2. After `necromancy_resolve`

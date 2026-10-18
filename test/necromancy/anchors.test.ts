@@ -167,6 +167,11 @@ describe("extractAnchors - harness boilerplate is not the user's intent", () => 
     expect(userIntent("<command-name>/herderp:ghost</command-name>")).toBe("/herderp:ghost");
   });
 
+  it("keeps a request that follows a leading system reminder", () => {
+    expect(userIntent("<system-reminder>ctx</system-reminder>\nPlease fix the login test")).toBe("Please fix the login test");
+    expect(userIntent("<system-reminder>a</system-reminder><system-reminder>b</system-reminder>")).toBeNull();
+  });
+
   it("userIntent returns null for system reminders and interruptions", () => {
     expect(userIntent("<system-reminder>ctx</system-reminder>")).toBeNull();
     expect(userIntent("[Request interrupted by user]")).toBeNull();

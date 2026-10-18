@@ -13,7 +13,7 @@ Read loosely, in any order:
 
 | `$ARGUMENTS` | Do this |
 |---|---|
-| Empty | The previous session in the current project: `necromancy_digest({ cwd: <current project>, currentSessionId })`, then take the newest entry that isn't `catchUp`. If the user's ask was broader ("what have we been doing"), report on the digest as a whole. |
+| Empty | The previous session in the current project: `necromancy_digest({ cwd: <current project>, currentSessionId })`, then take the newest entry that did real work. `catchUp: true` is a hint that a session only caught up; check its `lastState` before skipping it. If the user's ask was broader ("what have we been doing"), report on the digest as a whole. |
 | A session id (UUID) | Read that session. If it isn't in the current project, say "no session `<id>` found here", ask which project it belongs to, and stop. Never substitute another session. |
 | A handle (`upublish:1`, `:2`, or a bare `2`) | Resolve it per the skill. Always say which rung answered: the live tab, or the on-disk fallback. |
 | A name (`herderp`) | `necromancy_find_spaces({ query })`, then `necromancy_digest` on the matched space. One recent session means read it; several means show the digest and ask which. |

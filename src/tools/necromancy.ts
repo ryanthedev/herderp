@@ -117,7 +117,8 @@ export function registerNecromancyTools(server: McpServer, necromancy: Necromanc
       `${DEFAULT_DIGEST_SESSIONS}, max ${MAX_DIGEST_SESSIONS}), skipping the running session, newest first. Each ` +
       "entry is {sessionId, mtime, turnCount, ask, lastState, anchors} - the newest few commits/prs/versions/files/" +
       "errors/tests/decisions, each {text, index}, with `omitted` counting the rest - plus catchUp:true when the " +
-      "session was itself a catch-up (it called necromancy tools) - rarely the work to resume. Headless runs " +
+      "session looks like a catch-up only (called necromancy tools, edited no file) - a hint, so glance at its " +
+      "lastState before skipping it. Headless runs " +
       "(non-CLI entrypoint, e.g. automated SDK reviews) are skipped and counted in headlessSkipped unless " +
       "includeHeadless:true. Reach for this when the user asks what's been happening in a project or " +
       "to go through recent sessions, INSTEAD of outlining sessions one by one. Then read in depth only the one(s) " +

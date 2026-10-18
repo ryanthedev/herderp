@@ -80,6 +80,8 @@ const OUTLINE_CLIP_CHARS = 100;
 
 // Harness-injected user records that carry no intent of the user's own.
 const BOILERPLATE_USER_RE = /^\s*(?:<local-command-|<system-reminder>|<task-notification>|\[Request interrupted)/;
+// Complete reminder blocks the harness prepends to a real user message.
+const LEADING_REMINDER_RE = /^\s*<system-reminder>[\s\S]*?<\/system-reminder>/;
 // A slash-command record STARTS with its command markup; the same tags quoted
 // mid-text (a diff, a doc) are content, not an invocation.
 const COMMAND_RECORD_RE = /^\s*<command-(?:message|name)>/;
@@ -99,7 +101,11 @@ const UI_COMMANDS = new Set([
  * A slash-command invocation is recorded as `<command-name>` XML; it reads
  * back as the command line the user typed (`/herderp:ghost upublish:1`).
  */
-export function userIntent(text: string): string | null {
+export function userIntent(raw: string): string | null {
+  // Strip complete leading reminder blocks so a request that follows one
+  // survives; a reminder-only turn strips to "" and returns null below.
+  let text = raw;
+  while (LEADING_REMINDER_RE.test(text)) text = text.replace(LEADING_REMINDER_RE, "");
   if (text.trim() === "" || BOILERPLATE_USER_RE.test(text)) return null;
   const command = COMMAND_RECORD_RE.test(text) ? COMMAND_NAME_RE.exec(text) : null;
   if (command) {
@@ -108,7 +114,7 @@ export function userIntent(text: string): string | null {
     const args = COMMAND_ARGS_RE.exec(text)?.[1]?.trim() ?? "";
     return `${name} ${args}`.trim();
   }
-  return text;
+  return text === raw ? text : text.trim();
 }
 
 /** Whether a turn belongs to the `spine` view (see OUTLINE_VIEWS). */
@@ -247,11 +253,15 @@ export function outlineTurns(turns: Turn[], options: OutlineOptions = {}): Outli
   const start = Math.max(0, offset);
   const page = filtered.slice(start, start + Math.max(0, limit));
 
+  // The spine shows what the user asked, so its user previews render the
+  // normalized intent (`/herderp:ghost upublish:1`), not command XML.
+  const previewText = (turn: Turn): string =>
+    view === "spine" && turn.role === "user" ? (userIntent(turn.text) ?? turn.text) : turn.text;
   const entries: OutlineEntry[] = page.map((turn) => ({
     index: turn.index,
     role: turn.role,
     ...(turn.tool !== undefined && { tool: turn.tool }),
-    preview: clip(turn.text, OUTLINE_CLIP_CHARS),
+    preview: clip(previewText(turn), OUTLINE_CLIP_CHARS),
   }));
 
   const end = start + page.length;

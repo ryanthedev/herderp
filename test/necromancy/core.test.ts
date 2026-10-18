@@ -805,6 +805,26 @@ describe("necromancy core (fixture FS + stub client)", () => {
       expect(r.headlessSkipped).toBe(0);
     });
 
+    it("does not flag a session that ran a catch-up and then edited files", async () => {
+      const dir = await makeSpace(cwd);
+      const caughtUpThenWorked =
+        jl({ type: "user", message: { content: "catch me up, then fix the bug" }, cwd }) +
+        jl({
+          type: "assistant",
+          message: {
+            content: [
+              { type: "tool_use", id: "n1", name: "mcp__plugin_herderp_derp__necromancy_digest", input: {} },
+              { type: "tool_use", id: "e1", name: "Edit", input: { file_path: "src/bug.ts" } },
+            ],
+          },
+        });
+      await writeSession(dir, U1, caughtUpThenWorked);
+
+      const [entry] = (await necromancy({ client: stubClient() }).sessionDigest({ cwd })).sessions;
+
+      expect(entry!.catchUp).toBeUndefined();
+    });
+
     it("skips headless runs by default so they don't crowd real work out of the window", async () => {
       const dir = await makeSpace(cwd);
       const headless = (ask: string) => jl({ type: "user", message: { content: ask }, cwd, entrypoint: "sdk-py" });

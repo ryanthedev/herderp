@@ -11,32 +11,53 @@
 // Precision over recall: patterns are anchored to real signals (git verbs,
 // tool_use file_path fields, "N passed/failed", conventional-commit subjects)
 // rather than greedy catch-alls, so a false anchor is rarer than a missed one.
+//
+// Recency over arrival: a catch-up cares where a session ENDED, so when a
+// category overflows its cap the OLDEST items are dropped and the count of
+// what was dropped is reported in `omitted` - never a silent cut. Every item
+// carries the turn `index` it came from, so it can be read in context with
+// one necromancy_read call.
 
 import type { Turn } from "./reader.js";
 
-/** The canonical anchor set. Every field is bounded; lists are deduped. */
-export interface Anchors {
-  /** First user turn - what the session set out to do. */
-  ask: string | null;
-  /** Last assistant text (fallback: last turn) - where it left off. */
-  lastState: string | null;
-  /** git mutating ops + conventional-commit subjects + commit SHAs. */
-  commits: string[];
-  /** PR / pull-request / issue references (#N). */
-  prs: string[];
-  /** Semantic-version tokens (releases, bumps). */
-  versions: string[];
-  /** File paths from Edit/Write/Read/NotebookEdit tool inputs. */
-  files: string[];
-  /** Error / failure signals. */
-  errors: string[];
-  /** Test-result lines ("135 pass", "0 fail", "Ran N tests"). */
-  tests: string[];
-  /** User directives / pivots - the decisions that steered the session. */
-  decisions: string[];
+/** One extracted fact and the turn it came from (a necromancy_read index). */
+export interface AnchorItem {
+  text: string;
+  index: number;
 }
 
-/** Max entries kept per list field. Excess is dropped (see `truncated`). */
+/** The list-valued anchor categories, in output order. */
+export const ANCHOR_CATEGORIES = ["commits", "prs", "versions", "files", "errors", "tests", "decisions"] as const;
+export type AnchorCategory = (typeof ANCHOR_CATEGORIES)[number];
+
+/** The canonical anchor set. Every field is bounded; lists are deduped. */
+export interface Anchors {
+  /** First real user ask - what the session set out to do. Slash commands
+   * render as `/name args`; caveat/system boilerplate is skipped. */
+  ask: AnchorItem | null;
+  /** Last assistant text (fallback: last turn) - where it left off. */
+  lastState: AnchorItem | null;
+  /** git mutating ops + conventional-commit subjects + commit SHAs. */
+  commits: AnchorItem[];
+  /** PR / pull-request / issue references (#N). */
+  prs: AnchorItem[];
+  /** Semantic-version tokens (releases, bumps). Not harvested from
+   * tool_result output, where dependency dumps would drown the real bumps. */
+  versions: AnchorItem[];
+  /** File paths from Edit/Write/Read/NotebookEdit tool inputs. */
+  files: AnchorItem[];
+  /** Error / failure signals. */
+  errors: AnchorItem[];
+  /** Test-result lines ("135 pass", "0 fail", "Ran N tests"). */
+  tests: AnchorItem[];
+  /** User directives / pivots - the decisions that steered the session. */
+  decisions: AnchorItem[];
+  /** Per category, how many older distinct items were dropped to fit the cap.
+   * Only categories that lost something appear; `{}` means nothing was cut. */
+  omitted: Partial<Record<AnchorCategory, number>>;
+}
+
+/** Max entries kept per list field - the NEWEST this many survive. */
 export const MAX_ANCHORS_PER_CATEGORY = 12;
 const ANCHOR_CLIP_CHARS = 200;
 
@@ -50,34 +71,65 @@ const ERROR_RE = /\b(?:error|exception|traceback|stack trace|panic|segfault|ENOE
 const TEST_RESULT_RE = /\b(?:\d+\s+(?:pass|passing|passed|fail|failing|failed)|Ran\s+\d+\s+tests?)\b[^\n"]*/gi;
 const DECISION_CUE_RE = /\b(?:let's|instead|actually|do not|don't|we should|i want|i'd like|make sure|can we|change (?:it|this|that) to|rename|remove the|no[,.]|scrap|drop the|use \w+ not)\b/i;
 
+// Harness-injected user records that carry no intent of the user's own.
+const BOILERPLATE_USER_RE = /^\s*(?:<local-command-|<system-reminder>|<task-notification>|\[Request interrupted)/;
+const COMMAND_NAME_RE = /<command-name>\s*([^<]*?)\s*<\/command-name>/;
+const COMMAND_ARGS_RE = /<command-args>([\s\S]*?)<\/command-args>/;
+
 /** Whitespace-collapsed, ellipsis-terminated at ANCHOR_CLIP_CHARS. */
 function clip(raw: string): string {
   const collapsed = raw.replace(/\s+/g, " ").trim();
   return collapsed.length <= ANCHOR_CLIP_CHARS ? collapsed : `${collapsed.slice(0, ANCHOR_CLIP_CHARS - 1)}…`;
 }
 
-/** Push deduped, clipped, capped. Mutates `into`; ignores empties/dupes. */
-function collect(into: string[], seen: Set<string>, value: string): void {
-  if (into.length >= MAX_ANCHORS_PER_CATEGORY) return;
-  const v = clip(value);
-  if (v === "") return;
-  const key = v.toLowerCase();
-  if (seen.has(key)) return;
-  seen.add(key);
-  into.push(v);
+/**
+ * What a user turn actually asked, or null when it is harness boilerplate.
+ * A slash-command invocation is recorded as `<command-name>` XML; it reads
+ * back as the command line the user typed (`/herderp:ghost upublish:1`).
+ */
+export function userIntent(text: string): string | null {
+  if (text.trim() === "" || BOILERPLATE_USER_RE.test(text)) return null;
+  const command = COMMAND_NAME_RE.exec(text);
+  if (command) {
+    const args = COMMAND_ARGS_RE.exec(text)?.[1]?.trim() ?? "";
+    return `${command[1]} ${args}`.trim();
+  }
+  return text;
 }
 
-/** Run a global regex over text, feeding each whole match into `collect`. */
-function harvest(into: string[], seen: Set<string>, text: string, re: RegExp): void {
-  if (into.length >= MAX_ANCHORS_PER_CATEGORY) return;
-  re.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    // A capture group (e.g. the PR number / SHA) is the payload when present;
-    // otherwise the whole match. Non-global-safe guard: break on zero-width.
-    collect(into, seen, (m[1] ?? m[2] ?? m[0]).trim());
-    if (m.index === re.lastIndex) re.lastIndex++;
-    if (into.length >= MAX_ANCHORS_PER_CATEGORY) break;
+/**
+ * One category's distinct items, newest occurrence wins. A repeat moves the
+ * item to the end (with its newer index) so the recency order stays honest;
+ * Map preserves insertion order, so delete-then-set is the move.
+ */
+class Category {
+  private readonly items = new Map<string, AnchorItem>();
+
+  add(value: string, index: number): void {
+    const text = clip(value);
+    if (text === "") return;
+    const key = text.toLowerCase();
+    this.items.delete(key);
+    this.items.set(key, { text, index });
+  }
+
+  /** Run a global regex over text, feeding each match's payload into add. */
+  harvest(text: string, re: RegExp, index: number): void {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      // A capture group (e.g. the PR number / SHA) is the payload when present;
+      // otherwise the whole match. Zero-width guard keeps the loop finite.
+      this.add((m[1] ?? m[2] ?? m[0]).trim(), index);
+      if (m.index === re.lastIndex) re.lastIndex++;
+    }
+  }
+
+  /** The newest MAX_ANCHORS_PER_CATEGORY items (chronological) + how many were dropped. */
+  newest(): { kept: AnchorItem[]; dropped: number } {
+    const all = [...this.items.values()];
+    const dropped = Math.max(0, all.length - MAX_ANCHORS_PER_CATEGORY);
+    return { kept: all.slice(dropped), dropped };
   }
 }
 
@@ -86,60 +138,49 @@ function harvest(into: string[], seen: Set<string>, text: string, re: RegExp): v
  * Turn[] (including []), never throws. Single pass; every list bounded.
  */
 export function extractAnchors(turns: Turn[]): Anchors {
-  const commits: string[] = [];
-  const prs: string[] = [];
-  const versions: string[] = [];
-  const files: string[] = [];
-  const errors: string[] = [];
-  const tests: string[] = [];
-  const decisions: string[] = [];
-  const seen = {
-    commits: new Set<string>(),
-    prs: new Set<string>(),
-    versions: new Set<string>(),
-    files: new Set<string>(),
-    errors: new Set<string>(),
-    tests: new Set<string>(),
-    decisions: new Set<string>(),
-  };
+  const cats = Object.fromEntries(ANCHOR_CATEGORIES.map((c) => [c, new Category()])) as Record<
+    AnchorCategory,
+    Category
+  >;
 
-  let ask: string | null = null;
-  let lastState: string | null = null;
-  let lastAny: string | null = null;
+  let ask: AnchorItem | null = null;
+  let lastState: AnchorItem | null = null;
+  let lastAny: AnchorItem | null = null;
 
   for (const turn of turns) {
-    const text = turn.text;
-    if (ask === null && turn.role === "user" && text.trim() !== "") ask = clip(text);
-    if (turn.role === "text" && text.trim() !== "") lastState = clip(text);
-    if (text.trim() !== "") lastAny = clip(text);
+    const { text, index } = turn;
+    if (text.trim() === "") continue;
+    lastAny = { text: clip(text), index };
 
-    harvest(commits, seen.commits, text, GIT_OP_RE);
-    harvest(commits, seen.commits, text, CONVENTIONAL_COMMIT_RE);
-    harvest(commits, seen.commits, text, SHA_RE);
-    harvest(prs, seen.prs, text, PR_RE);
-    harvest(versions, seen.versions, text, VERSION_RE);
-    harvest(errors, seen.errors, text, ERROR_RE);
-    harvest(tests, seen.tests, text, TEST_RESULT_RE);
+    if (turn.role === "user") {
+      const intent = userIntent(text);
+      if (intent !== null) {
+        if (ask === null) ask = { text: clip(intent), index };
+        if (DECISION_CUE_RE.test(intent)) cats.decisions.add(intent, index);
+      }
+    }
+    if (turn.role === "text") lastState = { text: clip(text), index };
+
+    cats.commits.harvest(text, GIT_OP_RE, index);
+    cats.commits.harvest(text, CONVENTIONAL_COMMIT_RE, index);
+    cats.commits.harvest(text, SHA_RE, index);
+    cats.prs.harvest(text, PR_RE, index);
+    if (turn.role !== "tool_result") cats.versions.harvest(text, VERSION_RE, index);
+    cats.errors.harvest(text, ERROR_RE, index);
+    cats.tests.harvest(text, TEST_RESULT_RE, index);
 
     // Any tool_use may carry a path field; Bash/etc. simply have none, so
     // scanning them all is precise without an explicit tool allowlist.
-    if (turn.role === "tool_use") {
-      harvest(files, seen.files, text, FILE_FIELD_RE);
-    }
-    if (turn.role === "user" && DECISION_CUE_RE.test(text)) {
-      collect(decisions, seen.decisions, text);
-    }
+    if (turn.role === "tool_use") cats.files.harvest(text, FILE_FIELD_RE, index);
   }
 
-  return {
-    ask,
-    lastState: lastState ?? lastAny,
-    commits,
-    prs,
-    versions,
-    files,
-    errors,
-    tests,
-    decisions,
-  };
+  const lists = {} as Record<AnchorCategory, AnchorItem[]>;
+  const omitted: Partial<Record<AnchorCategory, number>> = {};
+  for (const category of ANCHOR_CATEGORIES) {
+    const { kept, dropped } = cats[category].newest();
+    lists[category] = kept;
+    if (dropped > 0) omitted[category] = dropped;
+  }
+
+  return { ask, lastState: lastState ?? lastAny, ...lists, omitted };
 }

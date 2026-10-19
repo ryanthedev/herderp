@@ -36,13 +36,14 @@ function stubNecromancy(overrides: Partial<Necromancy> = {}): Necromancy {
     throw new Error(`unexpected necromancy call: ${name}`);
   };
   return {
-    findSpaces: async () => ({ spaces: [STUB_SPACE], total: 1, truncated: false }),
+    findSpaces: async () => ({ spaces: [STUB_SPACE], total: 1, truncated: false, degraded: false }),
     listSessions: async () => ({ sessions: [STUB_SESSION], degraded: false }),
     resolveHandle: unexpected("resolveHandle"),
     searchAllSessions: unexpected("searchAllSessions"),
     sessionOutline: unexpected("sessionOutline"),
     sessionSearch: unexpected("sessionSearch"),
     sessionRead: unexpected("sessionRead"),
+    sessionDigest: unexpected("sessionDigest"),
     ...overrides,
   } as Necromancy;
 }
@@ -77,7 +78,7 @@ describe("registerNecromancyTools - DW-3.6", () => {
     const result = await registeredTools(server).necromancy_find_spaces!.handler({}, {});
 
     expect(result.isError).toBeFalsy();
-    expect(JSON.parse(result.content[0]!.text)).toEqual({ spaces: [STUB_SPACE], total: 1, truncated: false });
+    expect(JSON.parse(result.content[0]!.text)).toEqual({ spaces: [STUB_SPACE], total: 1, truncated: false, degraded: false });
   });
 
   it("necromancy_find_spaces_passes_query_and_limit_through_to_the_core", async () => {
@@ -88,7 +89,7 @@ describe("registerNecromancyTools - DW-3.6", () => {
       stubNecromancy({
         findSpaces: async (options) => {
           received = options;
-          return { spaces: [STUB_SPACE], total: 1, truncated: false };
+          return { spaces: [STUB_SPACE], total: 1, truncated: false, degraded: false };
         },
       }),
     );
@@ -264,6 +265,79 @@ describe("registerNecromancyTools reader tools - DW-2.1", () => {
 
     expect(received).toEqual({ sessionId: STUB_SESSION.sessionId, cwd: "/tmp/proj", offset: 5, limit: 10, filter: "tool_use" });
     expect(JSON.parse(result.content[0]!.text)).toEqual(STUB_OUTLINE);
+  });
+
+  it("necromancy_outline_passes_the_spine_view_through", async () => {
+    let received: unknown;
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerNecromancyTools(
+      server,
+      stubNecromancy({
+        sessionOutline: async (args) => {
+          received = args;
+          return STUB_OUTLINE;
+        },
+      }),
+    );
+
+    await registeredTools(server).necromancy_outline!.handler({ sessionId: STUB_SESSION.sessionId, cwd: "/tmp/proj", view: "spine" }, {});
+
+    expect(received).toEqual({ sessionId: STUB_SESSION.sessionId, cwd: "/tmp/proj", view: "spine" });
+  });
+
+  it("necromancy_read_passes_toolResultChars_through", async () => {
+    let received: unknown;
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerNecromancyTools(
+      server,
+      stubNecromancy({
+        sessionRead: async (args) => {
+          received = args;
+          return STUB_READ;
+        },
+      }),
+    );
+
+    await registeredTools(server).necromancy_read!.handler(
+      { sessionId: STUB_SESSION.sessionId, cwd: "/tmp/proj", from: 0, toolResultChars: 500 },
+      {},
+    );
+
+    expect(received).toEqual({ sessionId: STUB_SESSION.sessionId, cwd: "/tmp/proj", from: 0, toolResultChars: 500 });
+  });
+
+  it("necromancy_digest_caps_n_at_the_tool_boundary", async () => {
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerNecromancyTools(server, stubNecromancy());
+    const schema = registeredTools(server).necromancy_digest!.inputSchema as unknown as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(schema.safeParse({ cwd: "/tmp/proj", n: 10 }).success).toBe(true);
+    expect(schema.safeParse({ cwd: "/tmp/proj", n: 11 }).success).toBe(false);
+    expect(schema.safeParse({ cwd: "/tmp/proj", n: 0 }).success).toBe(false);
+  });
+
+  it("necromancy_digest_is_registered_and_passes_its_arguments_through", async () => {
+    let received: unknown;
+    const digest = { cwd: "/tmp/proj", sessions: [], total: 0, truncated: false, headlessSkipped: 0 };
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerNecromancyTools(
+      server,
+      stubNecromancy({
+        sessionDigest: async (args) => {
+          received = args;
+          return digest;
+        },
+      }),
+    );
+
+    const result = await registeredTools(server).necromancy_digest!.handler(
+      { cwd: "/tmp/proj", n: 3, currentSessionId: STUB_SESSION.sessionId, includeHeadless: true },
+      {},
+    );
+
+    expect(received).toEqual({ cwd: "/tmp/proj", n: 3, currentSessionId: STUB_SESSION.sessionId, includeHeadless: true });
+    expect(JSON.parse(result.content[0]!.text)).toEqual(digest);
   });
 
   it("DW_2_1_necromancy_search_is_a_thin_passthrough_to_the_core", async () => {

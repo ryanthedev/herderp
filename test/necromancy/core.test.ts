@@ -218,7 +218,7 @@ describe("necromancy core (fixture FS + stub client)", () => {
         client: stubClient(), // any herdr call would throw "unexpected"
       });
 
-      expect(await core.findSpaces()).toEqual({ spaces: [], total: 0, truncated: false });
+      expect(await core.findSpaces()).toEqual({ spaces: [], total: 0, truncated: false, degraded: false });
     });
 
     it("DW_3_2_tolerates_empty_cwd_workspaces_and_duplicate_cwds_first_listed_wins", async () => {
@@ -242,22 +242,37 @@ describe("necromancy core (fixture FS + stub client)", () => {
       expect(spaces[0]!.label).toBe("first");
     });
 
-    it("DW_4_4_findSpaces_surfaces_a_typed_HerdrError_when_herdr_is_unreachable", async () => {
-      // Salvaged from the removed live e2e suite: with a real HerdrClient
-      // over a down runner, findSpaces must surface a typed HerdrError (not a
-      // raw crash) once the disk scan finds a space and reaches herdr.
-      await makeSpace("/tmp/proj-a"); // a dir must exist so workspaceList is reached
+    it("DW_4_4_findSpaces_degrades_instead_of_failing_when_herdr_is_unreachable", async () => {
+      // With a real HerdrClient over a down runner, the herdr join is lost but
+      // the on-disk spaces are not: they still list, unlabeled, with
+      // degraded:true - the same contract listSessions keeps. (This used to
+      // throw HerdrError, which turned a herdr outage into "no spaces at all".)
+      const cwd = "/tmp/proj-a";
+      const dir = await makeSpace(cwd);
+      await writeSession(dir, U1, sessionContent("s", cwd));
       const herdrDownRunner: HerdrRunner = async () => {
-        throw new Error("connect ECONNREFUSED /Users/r/.config/herdr/herdr.sock");
+        throw new Error("connect ECONNREFUSED /tmp/herdr.sock");
       };
       const core = createNecromancy({ projectsRoot: root, client: createHerdrClient(herdrDownRunner) });
 
-      const error = await core.findSpaces().catch((e: unknown) => e);
+      const result = await core.findSpaces();
 
-      expect(error).toBeInstanceOf(HerdrError);
-      expect((error as HerdrError).code).toBe("spawn_failed");
-      expect((error as HerdrError).message).toContain("herdr");
-      expect((error as HerdrError).message).not.toContain("undefined is not a function");
+      expect(result.degraded).toBe(true);
+      expect(result.spaces).toEqual([
+        { cwd, label: null, workspaceId: null, sessionCount: 1, lastActivity: expect.any(Number) },
+      ]);
+    });
+
+    it("findSpaces_still_propagates_non_herdr_faults", async () => {
+      await makeSpace("/tmp/proj-a");
+      const core = necromancy({
+        client: stubClient({
+          workspaceList: async () => {
+            throw new TypeError("boom");
+          },
+        }),
+      });
+      expect(await core.findSpaces().catch((e: unknown) => e)).toBeInstanceOf(TypeError);
     });
   });
 
@@ -684,6 +699,16 @@ describe("necromancy core (fixture FS + stub client)", () => {
       expect(r).toMatchObject({ status: "resolved", sessionId: U1, handle: "upublish:1" });
     });
 
+    it("treats a bare positive integer as a tab in the current workspace (`1` == `:1`)", async () => {
+      const r = await core([WS], TABS, PANES).resolveHandle({ handle: "1", workspaceId: "wC" });
+      expect(r).toMatchObject({ status: "resolved", sessionId: U1, handle: "upublish:1" });
+    });
+
+    it("a bare number with no workspaceId is no_current_workspace, not a label lookup", async () => {
+      const r = await core([WS], TABS, PANES).resolveHandle({ handle: "1" });
+      expect(r).toMatchObject({ status: "not_found", reason: "no_current_workspace" });
+    });
+
     it("returns not_found:no_current_workspace for a label-less handle with no workspaceId", async () => {
       const r = await core([WS], TABS, PANES).resolveHandle({ handle: ":1" });
       expect(r).toMatchObject({ status: "not_found", reason: "no_current_workspace" });
@@ -711,6 +736,181 @@ describe("necromancy core (fixture FS + stub client)", () => {
       });
       const err = await necromancy({ client }).resolveHandle({ handle: "upublish:1" }).catch((e: unknown) => e);
       expect(err).toBeInstanceOf(HerdrError);
+    });
+  });
+
+  describe("sessionDigest - recent sessions in one call", () => {
+    const cwd = "/tmp/proj-digest";
+    const at = (iso: string) => new Date(iso);
+
+    /** A session with a real ask, an Edit, a PR, and a closing line. */
+    function workSession(ask: string, pr: number, extra: string[] = []): string {
+      return (
+        jl({ type: "user", message: { content: ask }, cwd, entrypoint: "cli" }) +
+        jl({
+          type: "assistant",
+          message: {
+            content: [
+              { type: "tool_use", id: "e1", name: "Edit", input: { file_path: `src/f${pr}.ts` } },
+              { type: "text", text: `opened PR #${pr}. done with ${ask}` },
+            ],
+          },
+        }) +
+        extra.join("")
+      );
+    }
+
+    it("digests the newest n sessions, skipping the current one, newest first", async () => {
+      const dir = await makeSpace(cwd);
+      await writeSession(dir, U1, workSession("oldest work", 1), at("2026-10-01T00:00:00Z"));
+      await writeSession(dir, U2, workSession("middle work", 2), at("2026-10-02T00:00:00Z"));
+      await writeSession(dir, U3, workSession("current session", 3), at("2026-10-03T00:00:00Z"));
+      const { client, calls } = trackingClient();
+
+      const r = await necromancy({ client }).sessionDigest({ cwd, n: 1, currentSessionId: U3 });
+
+      expect(calls).toEqual([]); // disk only - never reaches herdr
+      expect(r.total).toBe(2);
+      expect(r.truncated).toBe(true);
+      expect(r.sessions).toHaveLength(1);
+      const [entry] = r.sessions;
+      expect(entry!.sessionId).toBe(U2);
+      expect(entry!.ask).toEqual({ text: "middle work", index: 0 });
+      expect(entry!.lastState?.text).toContain("done with middle work");
+      expect(entry!.anchors.prs).toEqual([{ text: "2", index: 2 }]);
+      expect(entry!.anchors.files).toEqual([{ text: "src/f2.ts", index: 1 }]);
+      expect(entry!.turnCount).toBe(3);
+      expect(entry!.catchUp).toBeUndefined();
+      expect(entry!.entrypoint).toBeUndefined(); // cli is the norm, not flagged
+    });
+
+    it("flags catch-up sessions and, on request, headless launches so they aren't mistaken for real work", async () => {
+      const dir = await makeSpace(cwd);
+      const catchUp =
+        jl({ type: "user", message: { content: "catch me up" }, cwd }) +
+        jl({
+          type: "assistant",
+          message: { content: [{ type: "tool_use", id: "n1", name: "mcp__plugin_herderp_derp__necromancy_digest", input: {} }] },
+        });
+      const headless = jl({ type: "user", message: { content: "review this diff" }, cwd, entrypoint: "sdk-py" });
+      await writeSession(dir, U1, catchUp, at("2026-10-01T00:00:00Z"));
+      await writeSession(dir, U2, headless, at("2026-10-02T00:00:00Z"));
+
+      const r = await necromancy({ client: stubClient() }).sessionDigest({ cwd, includeHeadless: true });
+
+      expect(r.sessions.map((e) => e.sessionId)).toEqual([U2, U1]);
+      expect(r.sessions[0]!.entrypoint).toBe("sdk-py");
+      expect(r.sessions[1]!.catchUp).toBe(true);
+      expect(r.truncated).toBe(false);
+      expect(r.headlessSkipped).toBe(0);
+    });
+
+    it("does not flag a session that ran a catch-up and then edited files", async () => {
+      const dir = await makeSpace(cwd);
+      const caughtUpThenWorked =
+        jl({ type: "user", message: { content: "catch me up, then fix the bug" }, cwd }) +
+        jl({
+          type: "assistant",
+          message: {
+            content: [
+              { type: "tool_use", id: "n1", name: "mcp__plugin_herderp_derp__necromancy_digest", input: {} },
+              { type: "tool_use", id: "e1", name: "Edit", input: { file_path: "src/bug.ts" } },
+            ],
+          },
+        });
+      await writeSession(dir, U1, caughtUpThenWorked);
+
+      const [entry] = (await necromancy({ client: stubClient() }).sessionDigest({ cwd })).sessions;
+
+      expect(entry!.catchUp).toBeUndefined();
+    });
+
+    it("skips headless runs by default so they don't crowd real work out of the window", async () => {
+      const dir = await makeSpace(cwd);
+      const headless = (ask: string) => jl({ type: "user", message: { content: ask }, cwd, entrypoint: "sdk-py" });
+      await writeSession(dir, U1, workSession("real work", 1), at("2026-10-01T00:00:00Z"));
+      await writeSession(dir, U2, headless("security review"), at("2026-10-02T00:00:00Z"));
+      await writeSession(dir, U3, headless("security review again"), at("2026-10-03T00:00:00Z"));
+
+      const r = await necromancy({ client: stubClient() }).sessionDigest({ cwd, n: 1 });
+
+      expect(r.sessions.map((e) => e.sessionId)).toEqual([U1]);
+      expect(r.headlessSkipped).toBe(2);
+      expect(r).toMatchObject({ total: 1, truncated: false });
+    });
+
+    it("trims each anchor category to the newest 5 and folds the rest into omitted", async () => {
+      const dir = await makeSpace(cwd);
+      const prs = Array.from({ length: 8 }, (_, i) =>
+        jl({ type: "assistant", message: { content: [{ type: "text", text: `merged PR #${i + 1}` }] } }),
+      );
+      await writeSession(dir, U1, workSession("many prs", 100, prs));
+
+      const [entry] = (await necromancy({ client: stubClient() }).sessionDigest({ cwd })).sessions;
+
+      expect(entry!.anchors.prs.map((p) => p.text)).toEqual(["4", "5", "6", "7", "8"]);
+      expect(entry!.anchors.omitted.prs).toBe(4); // 9 distinct PRs (#100 + 1..8), 5 kept
+    });
+
+    it("skips a malformed transcript instead of letting it take a digest slot", async () => {
+      const dir = await makeSpace(cwd);
+      await writeSession(dir, U1, workSession("real work", 1), at("2026-10-01T00:00:00Z"));
+      await writeSession(dir, U2, "not json at all\n{also broken\n", at("2026-10-02T00:00:00Z"));
+
+      const r = await necromancy({ client: stubClient() }).sessionDigest({ cwd, n: 1 });
+
+      expect(r.sessions.map((e) => e.sessionId)).toEqual([U1]);
+      expect(r).toMatchObject({ total: 1, truncated: false });
+    });
+
+    it("ignores title-only stubs that hold no conversation", async () => {
+      const dir = await makeSpace(cwd);
+      await writeSession(dir, U1, workSession("real work", 1), at("2026-10-01T00:00:00Z"));
+      await writeSession(dir, U2, jl({ type: "ai-title", aiTitle: "Probe", sessionId: U2 }), at("2026-10-02T00:00:00Z"));
+
+      const r = await necromancy({ client: stubClient() }).sessionDigest({ cwd, n: 1 });
+
+      expect(r.sessions.map((e) => e.sessionId)).toEqual([U1]);
+      expect(r).toMatchObject({ total: 1, truncated: false });
+    });
+
+    it("does not report truncation when only headless runs remain past n", async () => {
+      const dir = await makeSpace(cwd);
+      const headless = jl({ type: "user", message: { content: "review" }, cwd, entrypoint: "sdk-py" });
+      await writeSession(dir, U1, headless, at("2026-10-01T00:00:00Z"));
+      await writeSession(dir, U2, headless, at("2026-10-02T00:00:00Z"));
+      await writeSession(dir, U3, workSession("real work", 1), at("2026-10-03T00:00:00Z"));
+
+      const r = await necromancy({ client: stubClient() }).sessionDigest({ cwd, n: 1 });
+
+      expect(r.sessions.map((e) => e.sessionId)).toEqual([U3]);
+      expect(r).toMatchObject({ total: 1, truncated: false, headlessSkipped: 2 });
+    });
+
+    it("returns an empty digest for an unknown space", async () => {
+      const core = necromancy({ client: stubClient() });
+      expect(await core.sessionDigest({ cwd: "/tmp/nowhere" })).toEqual({
+        cwd: "/tmp/nowhere",
+        sessions: [],
+        total: 0,
+        truncated: false,
+        headlessSkipped: 0,
+      });
+    });
+  });
+
+  describe("listSessions - entrypoint", () => {
+    it("surfaces non-CLI launches and leaves CLI sessions unflagged", async () => {
+      const cwd = "/tmp/proj-entry";
+      const dir = await makeSpace(cwd);
+      await writeSession(dir, U1, jl({ type: "user", message: { content: "a" }, cwd, entrypoint: "cli" }), new Date("2026-10-01T00:00:00Z"));
+      await writeSession(dir, U2, jl({ type: "user", message: { content: "b" }, cwd, entrypoint: "sdk-py" }), new Date("2026-10-02T00:00:00Z"));
+      const core = necromancy({ client: stubClient({ agentList: async () => [], workspaceList: async () => [], tabList: async () => [] }) });
+
+      const { sessions } = await core.listSessions(cwd);
+
+      expect(sessions.find((s) => s.sessionId === U2)!.entrypoint).toBe("sdk-py");
+      expect(sessions.find((s) => s.sessionId === U1)!.entrypoint).toBeUndefined();
     });
   });
 });

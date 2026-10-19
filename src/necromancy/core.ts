@@ -19,7 +19,7 @@ import { join } from "node:path";
 import type { HerdrClient } from "../herdr/client.js";
 import { HerdrError, type Pane, type Tab, type Workspace } from "../herdr/types.js";
 import { parseSessionPreview } from "./preview.js";
-import { extractAnchors, type Anchors } from "./anchors.js";
+import { ANCHOR_CATEGORIES, extractAnchors, type AnchorItem, type Anchors } from "./anchors.js";
 import {
   compileSearchPattern,
   DEFAULT_MAX_OUTLINE_ENTRIES,
@@ -33,6 +33,7 @@ import {
   summarizeTurnMatches,
   type OutlineOptions,
   type OutlineResult,
+  type ReadOptions,
   type ReadResult,
   type SearchOptions,
   type SearchResult,
@@ -40,7 +41,7 @@ import {
 } from "./reader.js";
 
 export type { Turn, TurnRole, OutlineEntry, SearchMatch, FullEntry } from "./reader.js";
-export type { Anchors } from "./anchors.js";
+export type { AnchorItem, Anchors } from "./anchors.js";
 
 /**
  * Claude Code's project-directory slug: every character that is not
@@ -92,8 +93,9 @@ export interface NecromancyOptions {
   /** Max matching sessions per searchAllSessions call (newest-activity first). Default 25. */
   maxSessionHits?: number;
   /** Max session files whose CONTENT searchAllSessions reads before it stops
-   * (newest-mtime first). Default 200 - a machine holds thousands of
-   * transcripts and a cross-space search would otherwise read them all. */
+   * (newest-mtime first). Default 2000 - enough for a whole machine's history
+   * (~600 transcripts / ~400 MB parse in under a second), while still bounding
+   * the work if the graveyard grows without limit. */
   maxScannedSessions?: number;
 }
 
@@ -119,6 +121,9 @@ export interface FindSpacesResult {
   total: number;
   /** True when more matched than were returned: narrow with `query` rather than assuming it's all. */
   truncated: boolean;
+  /** True when herdr was unreachable: every on-disk space is still listed,
+   * but label/workspaceId are null for all of them (live join unknown). */
+  degraded: boolean;
 }
 
 export interface SearchAllSessionsOptions {
@@ -179,6 +184,10 @@ export interface SessionInfo {
   live: boolean;
   preview: string;
   messageCount: number;
+  /** How the session was launched, present only when it was NOT the
+   * interactive CLI - e.g. `sdk-py` marks a headless SDK run, which is rarely
+   * the "previous session" a catch-up means. */
+  entrypoint?: string;
   /** The herdr handle (`<workspace-label>:<tab-label>`) for a live session,
    * so a listing shows which live agent each session is. Absent for
    * non-live sessions and when herdr is degraded/unreachable. */
@@ -195,6 +204,51 @@ export interface ListSessionsResult {
    * determined - the on-disk sessions are still returned (live all false),
    * never a raw error. Callers must say live status is unknown. */
   degraded: boolean;
+}
+
+export interface SessionDigestOptions {
+  /** The space to digest. */
+  cwd: string;
+  /** How many of the newest sessions to digest. Default 5. */
+  n?: number;
+  /** The running session's own id: it is skipped, never digested. */
+  currentSessionId?: string;
+  /** Include headless (non-CLI entrypoint) runs. Default false: automated
+   * SDK runs (reviews, pipelines) are rarely the work a catch-up means, and
+   * they would otherwise crowd real sessions out of the newest-n window. */
+  includeHeadless?: boolean;
+}
+
+/** One session's compact catch-up: enough to pick which one to read in depth. */
+export interface SessionDigestEntry {
+  sessionId: string;
+  mtime: number;
+  /** Turns in the session - the index space necromancy_read addresses. */
+  turnCount: number;
+  ask: AnchorItem | null;
+  lastState: AnchorItem | null;
+  /** The newest few anchors per category; `omitted` counts the rest. */
+  anchors: Pick<Anchors, "commits" | "prs" | "versions" | "files" | "errors" | "tests" | "decisions" | "omitted">;
+  /** Set when the session looks like a catch-up only: it called necromancy
+   * tools and never edited a file. A hint, not a verdict - check its
+   * lastState/anchors before skipping it as "the previous session". */
+  catchUp?: true;
+  /** As on SessionInfo: present only for non-CLI launches (headless runs,
+   * which appear only with includeHeadless). */
+  entrypoint?: string;
+}
+
+export interface SessionDigestResult {
+  cwd: string;
+  sessions: SessionDigestEntry[];
+  /** Sessions eligible for the digest: readable, holding at least one
+   * message, not the current one, and - unless includeHeadless - not headless
+   * runs. Exact, not an estimate. */
+  total: number;
+  /** True when eligible sessions exist beyond the `n` returned. */
+  truncated: boolean;
+  /** Headless runs in the space left out of the digest (0 with includeHeadless). */
+  headlessSkipped: number;
 }
 
 /** Resolution of a `<workspace>:<tab>` herdr handle to a live session. A
@@ -251,7 +305,14 @@ export const DEFAULT_MAX_SESSION_HITS = 25;
  * are ever read per call, newest-mtime first. Every other cap in here bounds a
  * RESPONSE; this one bounds the WORK, because searchAllSessions with no
  * `space` is otherwise "read every transcript on the machine". */
-export const DEFAULT_MAX_SCANNED_SESSIONS = 200;
+export const DEFAULT_MAX_SCANNED_SESSIONS = 2000;
+export const DEFAULT_DIGEST_SESSIONS = 5;
+export const MAX_DIGEST_SESSIONS = 10;
+/** Anchors per category in a digest entry - a digest is for choosing, not reading. */
+const DIGEST_ANCHORS_PER_CATEGORY = 5;
+const NECROMANCY_TOOL_RE = /necromancy_/;
+/** Tools whose use means a session did work, not just reading. */
+const FILE_WRITE_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
 
 /** A UUID-named .jsonl session file found on disk (stat metadata only). */
 interface SessionFile {
@@ -410,17 +471,27 @@ export function createNecromancy(options: NecromancyOptions) {
     try {
       entries = await readdir(projectsRoot, { withFileTypes: true });
     } catch (error) {
-      if (isEnoent(error)) return { spaces: [], total: 0, truncated: false }; // no graveyard at all: not a crash
+      if (isEnoent(error)) return { spaces: [], total: 0, truncated: false, degraded: false }; // no graveyard at all: not a crash
       throw error;
     }
     const dirs = entries.filter((entry) => entry.isDirectory());
-    if (dirs.length === 0) return { spaces: [], total: 0, truncated: false };
+    if (dirs.length === 0) return { spaces: [], total: 0, truncated: false, degraded: false };
 
     // Join key: slug(workspace.cwd) == graveyard dir name. Workspaces with
     // cwd "" (paneless - documented Phase 2 fallback) carry no join signal;
-    // first-listed wins when two workspaces share a cwd.
+    // first-listed wins when two workspaces share a cwd. The join is only
+    // enrichment, so a herdr outage degrades it (like listSessions) instead of
+    // hiding the on-disk spaces that reading depends on.
     const liveBySlug = new Map<string, { id: string; label: string | null; cwd: string }>();
-    for (const workspace of await client.workspaceList()) {
+    let degraded = false;
+    let workspaces: Workspace[] = [];
+    try {
+      workspaces = await client.workspaceList();
+    } catch (error) {
+      if (!(error instanceof HerdrError)) throw error; // non-herdr faults stay loud
+      degraded = true;
+    }
+    for (const workspace of workspaces) {
       if (workspace.cwd === "") continue;
       const slug = deriveSlug(workspace.cwd);
       if (!liveBySlug.has(slug)) liveBySlug.set(slug, workspace);
@@ -455,7 +526,7 @@ export function createNecromancy(options: NecromancyOptions) {
 
     const total = matched.length;
     const capped = matched.slice(0, Math.max(0, limit));
-    return { spaces: capped, total, truncated: capped.length < total };
+    return { spaces: capped, total, truncated: capped.length < total, degraded };
   }
 
   async function listSessions(
@@ -520,6 +591,7 @@ export function createNecromancy(options: NecromancyOptions) {
         live: liveIds.has(file.id),
         preview: parsed.preview,
         messageCount: parsed.messageCount,
+        ...(parsed.entrypoint !== undefined && parsed.entrypoint !== "cli" ? { entrypoint: parsed.entrypoint } : {}),
         ...(handle !== undefined ? { handle } : {}),
         ...(currentSessionId !== undefined && file.id === currentSessionId ? { current: true } : {}),
       });
@@ -637,7 +709,10 @@ export function createNecromancy(options: NecromancyOptions) {
    */
   async function resolveHandle(options: ResolveHandleOptions): Promise<ResolveHandleResult> {
     const { workspaceId, currentSessionId } = options;
-    const raw = options.handle.trim();
+    // A bare positive integer is a tab in the CURRENT space (`3` == `:3`) -
+    // the way a user types "the agent in tab 3" - not a workspace labeled "3".
+    const trimmed = options.handle.trim();
+    const raw = /^[1-9]\d*$/.test(trimmed) ? `:${trimmed}` : trimmed;
     if (raw === "" || raw === ":") {
       return { status: "not_found", reason: "invalid_handle", detail: `empty handle: ${JSON.stringify(options.handle)}` };
     }
@@ -792,16 +867,12 @@ export function createNecromancy(options: NecromancyOptions) {
     return searchTurns(turns, query, { limit: maxSearchMatches, ...searchOptions });
   }
 
-  async function sessionRead(args: {
-    sessionId: string;
-    cwd: string;
-    from: number;
-    to?: number;
-    maxBytes?: number;
-  }): Promise<ReadResult> {
-    const { sessionId, cwd, from, to, maxBytes } = args;
+  async function sessionRead(
+    args: { sessionId: string; cwd: string } & Pick<ReadOptions, "from" | "to" | "maxBytes" | "toolResultChars">,
+  ): Promise<ReadResult> {
+    const { sessionId, cwd, from, to, maxBytes, toolResultChars } = args;
     const turns = await loadTurns(sessionId, cwd);
-    return readTurns(turns, { from, to, maxBytes: maxBytes ?? maxReadBytes, maxSpan: maxReadSpan });
+    return readTurns(turns, { from, to, maxBytes: maxBytes ?? maxReadBytes, maxSpan: maxReadSpan, toolResultChars });
   }
 
   /**
@@ -815,6 +886,70 @@ export function createNecromancy(options: NecromancyOptions) {
     return extractAnchors(turns);
   }
 
+  /**
+   * "Catch me up on recent work" in one call: the newest `n` sessions of a
+   * space (skipping the running one), each as its ask, last state, and the
+   * newest few anchors - enough to say what each did and pick which to read in
+   * depth, without an outline-per-session fan-out. Disk only; no herdr call.
+   */
+  async function sessionDigest(options: SessionDigestOptions): Promise<SessionDigestResult> {
+    // n passes through unclamped, like every core limit; the tool schema caps it at MAX_DIGEST_SESSIONS.
+    const { cwd, currentSessionId, includeHeadless = false, n = DEFAULT_DIGEST_SESSIONS } = options;
+    const files = (await scanSessionFiles(join(projectsRoot, deriveSlug(cwd)))).filter(
+      (file) => withinSizeGate(file) && file.id !== currentSessionId,
+    );
+
+    // Eligibility (readable, well-formed, headless or not) is only known after
+    // reading a file, so every file in the space is classified - that is what
+    // keeps `total`/`truncated` exact - but only the newest `n` eligible ones
+    // pay for turn parsing and anchor extraction. A whole machine's history
+    // reads in under a second, so one space is cheap.
+    const sessions: SessionDigestEntry[] = [];
+    let eligible = 0;
+    let headlessSkipped = 0;
+    for (const file of files) {
+      const text = await readSessionText(file.path);
+      if (text === null) continue; // deleted mid-scan: skip
+      const preview = parseSessionPreview(text);
+      if (!preview) continue; // malformed jsonl: skip, never a digest slot (as in listSessions)
+      // No user/assistant record at all (e.g. a title-only stub a headless
+      // probe leaves behind) is not a session anyone did work in.
+      if (preview.messageCount === 0) continue;
+      const { entrypoint } = preview;
+      const headless = entrypoint !== undefined && entrypoint !== "cli";
+      if (headless && !includeHeadless) {
+        headlessSkipped += 1;
+        continue;
+      }
+      eligible += 1;
+      if (sessions.length >= n) continue;
+      const turns = parseTurns(text);
+      const { ask, lastState, omitted, ...lists } = extractAnchors(turns);
+      const anchors = { omitted: { ...omitted } } as SessionDigestEntry["anchors"];
+      for (const category of ANCHOR_CATEGORIES) {
+        const items = lists[category];
+        const dropped = Math.max(0, items.length - DIGEST_ANCHORS_PER_CATEGORY);
+        anchors[category] = items.slice(dropped);
+        if (dropped > 0) anchors.omitted[category] = (anchors.omitted[category] ?? 0) + dropped;
+      }
+      const toolUses = turns.filter((turn) => turn.role === "tool_use");
+      const catchUp =
+        toolUses.some((turn) => NECROMANCY_TOOL_RE.test(turn.tool ?? "")) &&
+        !toolUses.some((turn) => FILE_WRITE_TOOLS.has(turn.tool ?? ""));
+      sessions.push({
+        sessionId: file.id,
+        mtime: file.mtimeMs,
+        turnCount: turns.length,
+        ask,
+        lastState,
+        anchors,
+        ...(catchUp ? { catchUp: true as const } : {}),
+        ...(headless ? { entrypoint } : {}),
+      });
+    }
+    return { cwd, sessions, total: eligible, truncated: eligible > sessions.length, headlessSkipped };
+  }
+
   return {
     findSpaces,
     listSessions,
@@ -824,5 +959,6 @@ export function createNecromancy(options: NecromancyOptions) {
     sessionSearch,
     sessionRead,
     sessionAnchors,
+    sessionDigest,
   };
 }

@@ -399,6 +399,74 @@ describe("readTurns - DW-1.4", () => {
 // Factory methods (sessionOutline/sessionSearch/sessionRead) - DW-1.5/DW-1.6/DW-1.7
 // ---------------------------------------------------------------------------
 
+describe("outlineTurns - spine view", () => {
+  const T = (role: Turn["role"], text: string, tool?: string): Omit<Turn, "index"> => ({ role, text, ...(tool && { tool }) });
+  const session: Turn[] = [
+    T("user", "<local-command-caveat>Caveat: DO NOT respond</local-command-caveat>"),
+    T("user", "fix the login test"),
+    T("thinking", "hmm"),
+    T("tool_use", '{"command":"bun test"}', "Bash"),
+    T("tool_result", "3 fail", "Bash"),
+    T("text", "Fixed; all green."),
+    T("user", "<system-reminder>ctx</system-reminder>"),
+  ].map((turn, index) => ({ ...turn, index }));
+
+  it("keeps only real user asks and assistant prose, with their original indexes", () => {
+    const { entries, total } = outlineTurns(session, { view: "spine" });
+    expect(entries.map((e) => [e.index, e.role])).toEqual([
+      [1, "user"],
+      [5, "text"],
+    ]);
+    expect(total).toBe(2);
+  });
+
+  it("combines with filter (spine + user = the user's asks only)", () => {
+    const { entries } = outlineTurns(session, { view: "spine", filter: "user" });
+    expect(entries.map((e) => e.index)).toEqual([1]);
+  });
+
+  it("renders a slash command's normalized intent as its spine preview", () => {
+    const turns: Turn[] = [
+      { index: 0, role: "user", text: "<command-message>herderp:ghost</command-message>\n<command-name>/herderp:ghost</command-name>\n<command-args>upublish:1</command-args>" },
+    ];
+    expect(outlineTurns(turns, { view: "spine" }).entries[0]!.preview).toBe("/herderp:ghost upublish:1");
+    expect(outlineTurns(turns).entries[0]!.preview).toContain("<command-message>"); // view all stays verbatim
+  });
+
+  it("view all is the default and leaves everything in", () => {
+    expect(outlineTurns(session).total).toBe(session.length);
+  });
+});
+
+describe("readTurns - toolResultChars", () => {
+  const big = "x".repeat(5000);
+  const session: Turn[] = [
+    { index: 0, role: "tool_use", tool: "Bash", text: '{"command":"cat big.log"}' },
+    { index: 1, role: "tool_result", tool: "Bash", text: big },
+    { index: 2, role: "text", text: "y".repeat(300) },
+  ];
+
+  it("clips tool_result bodies and says how much was cut", () => {
+    const { entries, truncated } = readTurns(session, { from: 0, to: 2, toolResultChars: 100 });
+    expect(entries[1]!.text).toBe(`${"x".repeat(100)}… [clipped: 100 of 5000 chars]`);
+    expect(truncated).toBe(false);
+  });
+
+  it("leaves tool_use inputs and prose verbatim", () => {
+    const { entries } = readTurns(session, { from: 0, to: 2, toolResultChars: 10 });
+    expect(entries[0]!.text).toBe('{"command":"cat big.log"}');
+    expect(entries[2]!.text).toBe("y".repeat(300));
+  });
+
+  it("lets the byte budget reach turns a raw tool dump would have consumed", () => {
+    const raw = readTurns(session, { from: 0, to: 2, maxBytes: 1000 });
+    const clipped = readTurns(session, { from: 0, to: 2, maxBytes: 1000, toolResultChars: 100 });
+    expect(raw.truncated).toBe(true);
+    expect(clipped.truncated).toBe(false);
+    expect(clipped.entries.map((e) => e.index)).toEqual([0, 1, 2]);
+  });
+});
+
 describe("necromancy session-reader factory methods (fixture FS)", () => {
   let root: string;
   const cwd = "/tmp/proj-a";

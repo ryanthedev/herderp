@@ -12,13 +12,17 @@ import {
   DEFAULT_MAX_OUTLINE_ENTRIES,
   DEFAULT_MAX_READ_BYTES,
   DEFAULT_MAX_SEARCH_MATCHES,
+  OUTLINE_VIEWS,
   type TurnRole,
 } from "../necromancy/reader.js";
 import {
+  DEFAULT_DIGEST_SESSIONS,
   DEFAULT_MAX_SCANNED_SESSIONS,
   DEFAULT_MAX_SESSION_HITS,
   DEFAULT_MAX_SPACES,
+  MAX_DIGEST_SESSIONS,
 } from "../necromancy/core.js";
+import { MAX_ANCHORS_PER_CATEGORY } from "../necromancy/anchors.js";
 
 // The five TurnRole values, spelled out because zod enums need string
 // literals (not a TS type). `satisfies TurnRole[]` keeps this list in sync
@@ -34,7 +38,7 @@ const TURN_ROLES = ["user", "thinking", "text", "tool_use", "tool_result"] as co
 
 /**
  * Registers the necromancy tools on `server`, backed by `necromancy`:
- * find_spaces, search_all, list_sessions, resolve, outline, search, read, anchors.
+ * find_spaces, search_all, list_sessions, digest, resolve, outline, search, read, anchors.
  */
 export function registerNecromancyTools(server: McpServer, necromancy: Necromancy): void {
   registerTool(server, {
@@ -45,7 +49,9 @@ export function registerNecromancyTools(server: McpServer, necromancy: Necromanc
       `capped (limit, max ${DEFAULT_MAX_SPACES}) - a machine can hold hundreds of spaces, so pass a query to narrow ` +
       "to the one you want (case-insensitive substring over cwd/label/workspaceId) rather than dumping them all. " +
       "Returns total and truncated: truncated:true means more matched than were returned - narrow the query. " +
-      "If you already know the exact cwd (e.g. the current project), skip this and call necromancy_list_sessions directly.",
+      "degraded:true means herdr was unreachable: every on-disk space is still listed, but labels/workspaceIds are " +
+      "unknown. If you already know the exact cwd (e.g. the current project), skip this and call " +
+      "necromancy_list_sessions or necromancy_digest directly.",
     inputSchema: {
       query: z.string().optional(),
       limit: z.number().int().min(1).max(DEFAULT_MAX_SPACES).optional(),
@@ -97,10 +103,38 @@ export function registerNecromancyTools(server: McpServer, necromancy: Necromanc
       "session is. Pass currentSessionId (the running session's own id, from $CLAUDE_CODE_SESSION_ID) to flag " +
       "`current:true` on the session you're in - never read it as a target. Returns degraded:true when herdr was " +
       "unreachable: the on-disk sessions still come back (live all false, no handles) - say live status is unknown " +
-      "rather than implying nothing is running.",
+      "rather than implying nothing is running. A row carries `entrypoint` only when the session was not launched " +
+      "from the interactive CLI (e.g. sdk-py = a headless SDK run) - usually not the work to resume.",
     inputSchema: { cwd: z.string(), currentSessionId: z.string().optional() },
     handler: async ({ cwd, currentSessionId }) =>
       ({ ...(await necromancy.listSessions(cwd, { currentSessionId })) }) as Record<string, unknown>,
+  });
+
+  registerTool(server, {
+    name: "necromancy_digest",
+    description:
+      "Catch-up on a space's RECENT work in one call: the newest n sessions (default " +
+      `${DEFAULT_DIGEST_SESSIONS}, max ${MAX_DIGEST_SESSIONS}), skipping the running session, newest first. Each ` +
+      "entry is {sessionId, mtime, turnCount, ask, lastState, anchors} - the newest few commits/prs/versions/files/" +
+      "errors/tests/decisions, each {text, index}, with `omitted` counting the rest - plus catchUp:true when the " +
+      "session looks like a catch-up only (called necromancy tools, edited no file) - a hint, so glance at its " +
+      "lastState before skipping it. Headless runs " +
+      "(non-CLI entrypoint, e.g. automated SDK reviews) are skipped and counted in headlessSkipped unless " +
+      "includeHeadless:true. Reach for this when the user asks what's been happening in a project or " +
+      "to go through recent sessions, INSTEAD of outlining sessions one by one. Then read in depth only the one(s) " +
+      "that matter: an anchor's index goes straight into necromancy_read. Pass currentSessionId " +
+      "($CLAUDE_CODE_SESSION_ID). Reads disk only - works with herdr down.",
+    inputSchema: {
+      cwd: z.string(),
+      n: z.number().int().min(1).max(MAX_DIGEST_SESSIONS).optional(),
+      currentSessionId: z.string().optional(),
+      includeHeadless: z.boolean().optional(),
+    },
+    handler: async ({ cwd, n, currentSessionId, includeHeadless }) =>
+      ({ ...(await necromancy.sessionDigest({ cwd, n, currentSessionId, includeHeadless })) }) as Record<
+        string,
+        unknown
+      >,
   });
 
   registerTool(server, {
@@ -114,7 +148,9 @@ export function registerNecromancyTools(server: McpServer, necromancy: Necromanc
       "(workspace/tab/no_claude_agent/...) meaning fall through to necromancy_list_sessions and pick by on-disk " +
       "index instead. Pass workspaceId ($HERDR_WORKSPACE_ID) to resolve a label-less `:<tab>` against the current " +
       "space, and currentSessionId ($CLAUDE_CODE_SESSION_ID) so isCurrent flags the running session. A herdr " +
-      "outage surfaces as a tool error (herdr must be running for this) - list_sessions still works without it.",
+      "outage surfaces as a tool error (herdr must be running for this) - list_sessions still works without it. " +
+      "A bare number (`3`) means `:3` - a tab in the current space - not a workspace labeled \"3\". If " +
+      "isCurrent is true, that is the running session itself: never read it as the target.",
     inputSchema: {
       handle: z.string(),
       workspaceId: z.string().optional(),
@@ -130,7 +166,9 @@ export function registerNecromancyTools(server: McpServer, necromancy: Necromanc
       `Lists a session's turns as one short line each (a stable 0-based "index", a role - ` +
       "user/thinking/text/tool_use/tool_result - the tool name for tool_use/tool_result, and a clipped preview), " +
       `paged by offset/limit (limit capped at ${DEFAULT_MAX_OUTLINE_ENTRIES}) and optionally narrowed to one role via ` +
-      "filter (e.g. filter: tool_use for a tool-call ledger). Returns total and nextOffset for paging. " +
+      "filter (e.g. filter: tool_use for a tool-call ledger). view:'spine' keeps only the conversation itself - the " +
+      "user's real asks and the assistant's prose, no thinking/tool calls/tool output/harness boilerplate - the " +
+      "cheapest first look at what a session was about. Returns total and nextOffset for paging. " +
       "Every entry's index is directly addressable by necromancy_read - use outline or necromancy_search to find " +
       "indexes, then necromancy_read to see one in full.",
     inputSchema: {
@@ -139,9 +177,13 @@ export function registerNecromancyTools(server: McpServer, necromancy: Necromanc
       offset: z.number().int().min(0).optional(),
       limit: z.number().int().min(1).max(DEFAULT_MAX_OUTLINE_ENTRIES).optional(),
       filter: z.enum(TURN_ROLES).optional(),
+      view: z.enum(OUTLINE_VIEWS).optional(),
     },
-    handler: async ({ sessionId, cwd, offset, limit, filter }) =>
-      ({ ...(await necromancy.sessionOutline({ sessionId, cwd, offset, limit, filter })) }) as Record<string, unknown>,
+    handler: async ({ sessionId, cwd, offset, limit, filter, view }) =>
+      ({ ...(await necromancy.sessionOutline({ sessionId, cwd, offset, limit, filter, view })) }) as Record<
+        string,
+        unknown
+      >,
   });
 
   registerTool(server, {
@@ -170,25 +212,34 @@ export function registerNecromancyTools(server: McpServer, necromancy: Necromanc
       "single turn). Get indexes from necromancy_outline or necromancy_search first; never guess one. Both the " +
       `entry span and the total response size are hard-capped (maxBytes, capped at ${DEFAULT_MAX_READ_BYTES} bytes); ` +
       "truncated:true means the cap cut the range short - page forward with a new from rather than assuming the " +
-      "whole range came back.",
+      "whole range came back. toolResultChars clips each tool_result body to that many characters (marked " +
+      "'[clipped: N of M chars]'; tool_use inputs and prose stay verbatim) - tool output is most of a session's " +
+      "bytes, so set it (e.g. 500) when reading a span for the story rather than for one specific output.",
     inputSchema: {
       sessionId: z.string(),
       cwd: z.string(),
       from: z.number().int().min(0),
       to: z.number().int().min(0).optional(),
       maxBytes: z.number().int().min(1).max(DEFAULT_MAX_READ_BYTES).optional(),
+      toolResultChars: z.number().int().min(0).max(DEFAULT_MAX_READ_BYTES).optional(),
     },
-    handler: async ({ sessionId, cwd, from, to, maxBytes }) =>
-      ({ ...(await necromancy.sessionRead({ sessionId, cwd, from, to, maxBytes })) }) as Record<string, unknown>,
+    handler: async ({ sessionId, cwd, from, to, maxBytes, toolResultChars }) =>
+      ({ ...(await necromancy.sessionRead({ sessionId, cwd, from, to, maxBytes, toolResultChars })) }) as Record<
+        string,
+        unknown
+      >,
   });
 
   registerTool(server, {
     name: "necromancy_anchors",
     description:
       "Deterministically extracts a session's 'always grab' anchor set - the load-bearing facts a catch-up must " +
-      "never miss: ask (first user turn), lastState (where it left off), commits, prs, versions, files touched, " +
+      "never miss: ask (first real user ask), lastState (where it left off), commits, prs, versions, files touched, " +
       "errors, tests (result lines), and decisions (user directives). Pure regex over the transcript, no model call. " +
-      "Grab these first and ground a summary on them rather than relying on a skim. Each list is deduped and capped.",
+      "Every item is {text, index} - index is the turn it came from, ready for necromancy_read. Each list is deduped " +
+      `and keeps its NEWEST ${MAX_ANCHORS_PER_CATEGORY}; omitted counts what each category dropped (older items), so ` +
+      "a non-empty omitted means the list is not the whole story. Grab these first and ground a summary on them " +
+      "rather than relying on a skim.",
     inputSchema: {
       sessionId: z.string(),
       cwd: z.string(),

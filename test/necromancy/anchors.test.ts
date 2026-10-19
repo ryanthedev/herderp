@@ -12,10 +12,14 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { extractAnchors, MAX_ANCHORS_PER_CATEGORY } from "../../src/necromancy/anchors.js";
+import { extractAnchors, MAX_ANCHORS_PER_CATEGORY, type AnchorItem } from "../../src/necromancy/anchors.js";
+import { userIntent } from "../../src/necromancy/reader.js";
 import { registerNecromancyTools } from "../../src/tools/necromancy.js";
 import { createNecromancy, deriveSlug, type Necromancy, type Turn } from "../../src/necromancy/core.js";
 import type { HerdrClient } from "../../src/herdr/client.js";
+
+/** Just the texts of an anchor list, for content assertions. */
+const texts = (items: AnchorItem[]): string[] => items.map((item) => item.text);
 
 /** Turn[] builder: assigns sequential indexes so tests read as plain content. */
 function turns(...specs: Array<Omit<Turn, "index">>): Turn[] {
@@ -39,41 +43,45 @@ describe("extractAnchors - planted needles", () => {
   const a = extractAnchors(PLANTED);
 
   it("grabs the ask (first user turn)", () => {
-    expect(a.ask).toBe("please fix the flaky login test and cut a release");
+    expect(a.ask).toEqual({ text: "please fix the flaky login test and cut a release", index: 0 });
   });
 
   it("grabs the last state (last assistant text)", () => {
-    expect(a.lastState).toBe("All landed and clean.");
+    expect(a.lastState).toEqual({ text: "All landed and clean.", index: 8 });
   });
 
   it("grabs the file touched via the tool_use file_path field", () => {
-    expect(a.files).toContain("src/necromancy/reader.ts");
+    expect(a.files).toContainEqual({ text: "src/necromancy/reader.ts", index: 2 });
   });
 
   it("grabs the error signal", () => {
-    expect(a.errors.some((e) => e.includes("ENOENT"))).toBe(true);
+    expect(texts(a.errors).some((e) => e.includes("ENOENT"))).toBe(true);
   });
 
   it("grabs the git op, the conventional-commit subject, and the SHA", () => {
-    expect(a.commits.some((c) => c.startsWith("git commit"))).toBe(true);
-    expect(a.commits.some((c) => c.startsWith("feat(necromancy):"))).toBe(true);
-    expect(a.commits).toContain("a1b2c3d4");
+    expect(texts(a.commits).some((c) => c.startsWith("git commit"))).toBe(true);
+    expect(texts(a.commits).some((c) => c.startsWith("feat(necromancy):"))).toBe(true);
+    expect(a.commits).toContainEqual({ text: "a1b2c3d4", index: 5 });
   });
 
   it("grabs the PR number", () => {
-    expect(a.prs).toContain("42");
+    expect(a.prs).toContainEqual({ text: "42", index: 6 });
   });
 
   it("grabs the version bump", () => {
-    expect(a.versions).toContain("0.4.0");
+    expect(texts(a.versions)).toContain("0.4.0");
   });
 
   it("grabs the test-result line", () => {
-    expect(a.tests.some((t) => t.includes("135 pass"))).toBe(true);
+    expect(texts(a.tests).some((t) => t.includes("135 pass"))).toBe(true);
+  });
+
+  it("reports nothing omitted when no category overflowed", () => {
+    expect(a.omitted).toEqual({});
   });
 
   it("grabs the user decision/pivot", () => {
-    expect(a.decisions.some((d) => d.includes("rename the module"))).toBe(true);
+    expect(texts(a.decisions).some((d) => d.includes("rename the module"))).toBe(true);
   });
 });
 
@@ -98,13 +106,87 @@ describe("extractAnchors - never crashes, always bounded", () => {
       ...Array.from({ length: 5 }, () => ({ role: "text" as const, text: "merged PR #7" })), // dupes
     );
     const a = extractAnchors(many);
-    expect(a.prs.length).toBeLessThanOrEqual(MAX_ANCHORS_PER_CATEGORY);
-    expect(new Set(a.prs).size).toBe(a.prs.length); // no dupes survived
+    expect(a.prs.length).toBe(MAX_ANCHORS_PER_CATEGORY);
+    expect(new Set(texts(a.prs)).size).toBe(a.prs.length); // no dupes survived
+  });
+
+  it("keeps the NEWEST items when a category overflows, and counts what it dropped", () => {
+    const many = turns(...Array.from({ length: 30 }, (_, i) => ({ role: "text" as const, text: `merged PR #${i}` })));
+    const a = extractAnchors(many);
+    // The last 12 PRs (18..29) survive in chronological order; the oldest 18 are reported, not silently cut.
+    expect(texts(a.prs)).toEqual(Array.from({ length: MAX_ANCHORS_PER_CATEGORY }, (_, i) => String(18 + i)));
+    expect(a.prs.at(-1)).toEqual({ text: "29", index: 29 });
+    expect(a.omitted).toEqual({ prs: 30 - MAX_ANCHORS_PER_CATEGORY });
+  });
+
+  it("moves a repeated item to its latest occurrence", () => {
+    const a = extractAnchors(
+      turns({ role: "text", text: "see PR #5" }, { role: "text", text: "see PR #6" }, { role: "text", text: "merged PR #5" }),
+    );
+    expect(a.prs).toEqual([
+      { text: "6", index: 1 },
+      { text: "5", index: 2 },
+    ]);
   });
 
   it("falls back to the last turn for lastState when there is no assistant text", () => {
     const a = extractAnchors(turns({ role: "user", text: "only a user turn" }));
-    expect(a.lastState).toBe("only a user turn");
+    expect(a.lastState).toEqual({ text: "only a user turn", index: 0 });
+  });
+});
+
+describe("extractAnchors - harness boilerplate is not the user's intent", () => {
+  it("skips a local-command caveat when picking the ask and decisions", () => {
+    const a = extractAnchors(
+      turns(
+        { role: "user", text: "<local-command-caveat>Caveat: DO NOT respond to these messages</local-command-caveat>" },
+        { role: "user", text: "catch me up on the login work" },
+      ),
+    );
+    expect(a.ask).toEqual({ text: "catch me up on the login work", index: 1 });
+    expect(a.decisions).toEqual([]);
+  });
+
+  it("reads a slash-command record back as the command line", () => {
+    const a = extractAnchors(
+      turns({
+        role: "user",
+        text: "<command-message>herderp:ghost</command-message>\n<command-name>/herderp:ghost</command-name>\n<command-args>upublish:1</command-args>",
+      }),
+    );
+    expect(a.ask?.text).toBe("/herderp:ghost upublish:1");
+  });
+
+  it("treats command markup quoted mid-text (a diff, a doc) as content, not an invocation", () => {
+    const quoted = "Review this diff: + const RE = /<command-name>\\/herderp:ghost<\\/command-name>/;";
+    expect(userIntent(quoted)).toBe(quoted);
+  });
+
+  it("skips built-in UI commands like /model, which state no task", () => {
+    expect(userIntent("<command-name>/model</command-name>\n<command-args></command-args>")).toBeNull();
+    expect(userIntent("<command-name>/herderp:ghost</command-name>")).toBe("/herderp:ghost");
+  });
+
+  it("keeps a request that follows a leading system reminder", () => {
+    expect(userIntent("<system-reminder>ctx</system-reminder>\nPlease fix the login test")).toBe("Please fix the login test");
+    expect(userIntent("<system-reminder>a</system-reminder><system-reminder>b</system-reminder>")).toBeNull();
+  });
+
+  it("userIntent returns null for system reminders and interruptions", () => {
+    expect(userIntent("<system-reminder>ctx</system-reminder>")).toBeNull();
+    expect(userIntent("[Request interrupted by user]")).toBeNull();
+    expect(userIntent("   ")).toBeNull();
+    expect(userIntent("ship it")).toBe("ship it");
+  });
+
+  it("does not harvest versions from tool_result output (dependency dumps)", () => {
+    const a = extractAnchors(
+      turns(
+        { role: "tool_result", tool: "Bash", text: "zod@3.25.0 typescript@5.7.0 react@18.3.1" },
+        { role: "text", text: "bumped herderp to 0.12.0" },
+      ),
+    );
+    expect(texts(a.versions)).toEqual(["0.12.0"]);
   });
 });
 
@@ -171,11 +253,11 @@ describe("necromancy_anchors tool integration (real core, real registry)", () =>
       const result = await tools.necromancy_anchors!.handler({ sessionId: SESSION_ID, cwd: CWD }, {});
       expect(result.isError).toBeFalsy();
       const anchors = JSON.parse(result.content[0]!.text);
-      expect(anchors.ask).toBe("ship the anchors feature");
-      expect(anchors.files).toContain("src/necromancy/anchors.ts");
-      expect(anchors.prs).toContain("99");
-      expect(anchors.versions).toContain("0.4.0");
-      expect(anchors.tests.some((t: string) => t.includes("135 pass"))).toBe(true);
+      expect(anchors.ask.text).toBe("ship the anchors feature");
+      expect(texts(anchors.files)).toContain("src/necromancy/anchors.ts");
+      expect(texts(anchors.prs)).toContain("99");
+      expect(texts(anchors.versions)).toContain("0.4.0");
+      expect(texts(anchors.tests).some((t) => t.includes("135 pass"))).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

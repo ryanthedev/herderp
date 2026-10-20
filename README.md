@@ -5,7 +5,7 @@ A Claude Code plugin: a stdio **MCP server** wrapping the [`herdr`](https://gith
 ## What it does
 
 - **Curated herdr tools** — MCP calls over the `herdr` CLI instead of hand-typing it. One tool per *resource*, each taking an `action`, so ~35 CLI subcommands cost six tools rather than thirty-five:
-  - `herdr_agent` — `list`/`get`/`read`/`send`/`focus`/`rename`/`start`/`wait`/`explain`.
+  - `herdr_agent` — `list`/`get`/`read`/`send`/`focus`/`rename`/`start`/`wait`/`explain`/`watch` (see [Watching agents](#watching-agents)).
   - `herdr_pane` — `list`/`get`/`run`/`close`/`rename`/`focus`/`split`/`swap`/`move`.
   - `herdr_tab` and `herdr_workspace` — `list`/`get`/`create`/`rename`/`focus`/`close`.
   - `herdr_worktree` — `list`/`create`/`open`/`remove`.
@@ -23,6 +23,33 @@ A Claude Code plugin: a stdio **MCP server** wrapping the [`herdr`](https://gith
   - `necromancy_outline` / `necromancy_search` / `necromancy_read` — read a session's turns: outline its shape (`view: "spine"` for just the asks and replies), search it by keyword or regex, and pull specific turns back verbatim (`toolResultChars` clips tool output), all capped on count and bytes.
 - **`necromancy` skill** — picks the entry point (digest, cross-session search, handle, or a named space), reads only what matters, and stays honest about every cap.
 - **`/herderp:ghost` command** — a one-shot catch-up: the previous session by default, or point it at a space, a handle, or a session id. Get a plain summary of what it did and where it stopped, with turn citations and questions to resume. Reading only — it never revives.
+
+## Watching agents
+
+`herdr_agent{action:"watch"}` lets one agent keep working while it watches others, and get woken when they need it. MCP tools can't push messages into a conversation, so the action returns a **command for Claude Code's Monitor tool**, which turns each line the command prints into a notification:
+
+```
+herdr_agent{action:"watch", targets:["cap-api","cap-ui"], stallMs:600000}
+→ { command: "'bun' 'run' '…/src/watch/cli.ts' 'cap-api' 'cap-ui' '--stall' '600000'",
+    description: "herdr agents: cap-api, cap-ui", timeout_ms: 1800000, targets: [...], hint: "…" }
+
+Monitor({ command, description, timeout_ms })
+```
+
+The targets are resolved when you call the action, so a typo fails there, not after arming. Once armed, the watcher prints one line per event worth acting on:
+
+| Line | When |
+|---|---|
+| `[cap-api] watching - currently working (session 1a2b3c4d)` | Once per target at start. A target that has already stopped shows its status here. |
+| `[cap-api] done after 12m working - last: "…" (session 1a2b3c4d)` | The agent finished its turn. `idle` reads the same way. The last line of its own reply is quoted from its transcript. |
+| `[cap-ui] blocked after 40s working - needs input (a permission prompt or a question)` | The agent is waiting on someone. |
+| `[cap-ui] stalled - no activity for 10m while working` | With `stallMs`: nothing has been written to its transcript and its status hasn't changed for that long. Set `stallMs` longer than your slowest expected command. |
+| `[cap-db] gone - agent exited` | The pane closed or the agent quit. |
+| `[watch] lost herdr's event stream - …` | herdr went away. The watch exits with status 1; re-arm it once herdr is back. |
+
+- **Options:** `once:true` exits after the first event (use it for "tell me when this one finishes"). `verbose:true` also reports agents starting to work again. `json:true` prints one JSON object per line.
+- **Expiry:** Monitor ends a watch after 30 minutes at most. Re-arm it with the same command to keep watching.
+- **Scope:** the watch runs on this machine and subscribes to its herdr server's event stream (herdr's `events.subscribe` socket API). It doesn't take `host` yet.
 
 ## Remote hosts
 

@@ -31,7 +31,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerTool } from "../registry.js";
 import type { ToolArgs, ToolInputShape, ToolResult } from "../registry.js";
 import type { HerdrClient } from "../herdr/client.js";
-import type { ClientResolver } from "../herdr/hosts.js";
+import { LOCAL_HOST, type ClientResolver } from "../herdr/hosts.js";
+import { planWatch } from "../watch/command.js";
 import type { AgentKind, AgentReadSource } from "../herdr/types.js";
 
 /** `--until` on both `agent wait` and `agent prompt`. Verbatim from herdr
@@ -137,10 +138,16 @@ export function registerCuratedTools(server: McpServer, clients: ClientResolver)
       "- start: run an agent binary in an EXISTING pane (name, kind, paneId; optional timeoutMs, argv). herdr does not make the pane - create one with herdr_pane{action:'split'} or herdr_workspace{action:'create'} first, and it must be at a shell prompt.\n" +
       "- wait: block until the agent reaches a state (target; optional until, timeoutMs). until takes one state or several and matches the first to arrive; omit it for any settled state (idle/done/blocked). 'done' IS accepted, and is usually what you want after prompting.\n" +
       "- explain: herdr's own diagnosis of how it detected this agent's state (target) - reach for it when a reported status looks wrong.\n" +
+      "- watch: get notified while you keep working - when agents stop (done/idle/blocked, with their last message), stall, or go away (target, or targets for several; optional stallMs, once, json, verbose). Returns a command to pass to the Monitor tool, which turns each line it prints into a notification. This machine only - not with host.\n" +
       "`target` accepts a terminal id, a unique agent name, a detected agent label, or a legacy pane id.",
     inputSchema: {
-      action: z.enum(["list", "get", "read", "prompt", "send_keys", "focus", "rename", "start", "wait", "explain"]),
+      action: z.enum(["list", "get", "read", "prompt", "send_keys", "focus", "rename", "start", "wait", "explain", "watch"]),
       target: z.string().optional(),
+      targets: z.array(z.string()).optional(),
+      stallMs: z.number().int().positive().optional(),
+      once: z.boolean().optional(),
+      json: z.boolean().optional(),
+      verbose: z.boolean().optional(),
       text: z.string().optional(),
       keys: z.array(z.string()).optional(),
       name: z.string().optional(),
@@ -230,6 +237,16 @@ export function registerCuratedTools(server: McpServer, clients: ClientResolver)
           };
         case "explain":
           return { explain: await client.agentExplain(need(args.target, "target", tool, "explain")) };
+        case "watch": {
+          // The watcher subscribes to THIS machine's herdr socket; a remote
+          // watch would have to run on that machine, which is a later step.
+          if (args.host !== undefined && args.host !== "" && args.host !== LOCAL_HOST) {
+            throw new Error(`${tool}{action:"watch"} runs on this machine only - drop host (remote watch is not supported yet)`);
+          }
+          const targets = [...(args.targets ?? []), ...(args.target ? [args.target] : [])];
+          if (targets.length === 0) throw new Error(`${tool}{action:"watch"} requires "target" or "targets"`);
+          return { ...(await planWatch(client, { targets, stallMs: args.stallMs, once: args.once, json: args.json, verbose: args.verbose })) };
+        }
       }
     },
   });

@@ -50,7 +50,7 @@ describe("subscribeEvents", () => {
       request = req;
       socket.write(`${JSON.stringify({ id: req.id, result: { type: "subscription_started" } })}\n`);
       // two events split across writes, plus a junk line that must be skipped
-      const both = statusLine("w1:p1", "working") + "not json\n" + statusLine("w1:p1", "done");
+      const both = statusLine("w1:p1", "working") + "not json\nnull\n42\n[1]\n" + statusLine("w1:p1", "done");
       socket.write(both.slice(0, 40));
       setTimeout(() => {
         socket.write(both.slice(40));

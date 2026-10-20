@@ -147,27 +147,40 @@ export async function runWatch(options: RunWatchOptions, deps: RunWatchDeps): Pr
       resolve(code);
     };
 
+    /**
+     * A stop's summary. Started the moment the event is emitted - not when the
+     * queue reaches it - so the session it quotes is the one in the pane when
+     * the agent stopped, even if a /clear or restart follows before the line
+     * prints. If that identity can't be read, the line goes out without one.
+     */
     const contextFor = async (event: WatchEvent): Promise<EventContext> => {
       if (event.type !== "status" || !STOPPED_STATUSES.has(event.status)) return {};
-      await sleep(summaryDelayMs); // let the final turn reach the transcript
+      let session: { sessionId: string; cwd: string };
       try {
         const agent = await client.agentGet(event.paneId);
         if (agent.sessionId === "") return {};
-        const lastState = await deps.readLastState(agent.sessionId, agent.cwd);
-        return { sessionId: agent.sessionId, ...(lastState !== undefined && { lastState }) };
+        session = { sessionId: agent.sessionId, cwd: agent.cwd };
       } catch {
         return {}; // a summary is a bonus; the event still prints
+      }
+      await sleep(summaryDelayMs); // let the final turn reach that session's transcript
+      try {
+        const lastState = await deps.readLastState(session.sessionId, session.cwd);
+        return { sessionId: session.sessionId, ...(lastState !== undefined && { lastState }) };
+      } catch {
+        return { sessionId: session.sessionId };
       }
     };
 
     const emit = (events: WatchEvent[]) => {
       for (const event of events) {
         pending += 1;
+        const context = contextFor(event); // bind the session now; print in order below
         queue = queue.then(async () => {
           if (finished) return;
-          const context = await contextFor(event);
+          const resolved = await context;
           if (finished) return;
-          deps.write(options.json ? formatEventJson(event, context) : formatEvent(event, context));
+          deps.write(options.json ? formatEventJson(event, resolved) : formatEvent(event, resolved));
           pending -= 1;
           if (options.once || (watcher.allGone() && pending === 0)) finish(0);
         });
@@ -193,7 +206,20 @@ export async function runWatch(options: RunWatchOptions, deps: RunWatchDeps): Pr
       else emit(watcher.status(paneId, toAgentStatus(event.data.agent_status), now()));
     };
 
+    // One poll at a time: a poll slower than pollMs must not overlap the next,
+    // or an older answer could land after a newer one.
+    let polling = false;
     const poll = async () => {
+      if (polling || finished) return;
+      polling = true;
+      try {
+        await pollOnce();
+      } finally {
+        polling = false;
+      }
+    };
+
+    const pollOnce = async () => {
       for (const paneId of watcher.livePaneIds()) {
         const seqBefore = socketSeq.get(paneId) ?? 0;
         try {

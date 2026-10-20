@@ -188,6 +188,77 @@ describe("runWatch", () => {
     expect(lines.at(-1)).toMatch(/^\[lead\] done after \d+s working/);
   });
 
+  it("quotes the session that stopped, even if the pane moves to a new session before the line prints", async () => {
+    await writeTranscript();
+    const herdr = await fakeHerdr();
+    const lines: string[] = [];
+    const NEW = "22222222-2222-2222-2222-222222222222";
+    let stopped = false;
+    // until the stop, the pane holds SESSION; right after it, a /clear moves it to NEW
+    const client = { agentGet: async () => (stopped ? { ...AGENT, sessionId: NEW } : AGENT) };
+    const quoted: string[] = [];
+    const readLastState = async (sessionId: string) => {
+      quoted.push(sessionId);
+      return `reply from ${sessionId.slice(0, 8)}`;
+    };
+    const done = run(
+      { targets: ["lead"], once: true },
+      deps(lines, client, { readLastState, summaryDelayMs: 40, pollMs: 60_000 }),
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    herdr.push({ agent: "claude", agent_status: "done", pane_id: "w1:p1", workspace_id: "w1" });
+    await new Promise((r) => setTimeout(r, 10)); // the stop's identity is read in this window
+    stopped = true;
+    await done;
+    expect(quoted).toEqual([SESSION]);
+    expect(lines.at(-1)).toContain('last: "reply from 11111111" (session 11111111)');
+  });
+
+  it("never runs polls on top of each other", async () => {
+    await writeTranscript();
+    await fakeHerdr();
+    let calls = 0;
+    let inFlight = 0;
+    let maxInFlight = 0;
+    // every lookup after the first is slower than the 5ms poll interval
+    const client = {
+      agentGet: async () => {
+        if (++calls === 1) return AGENT;
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((r) => setTimeout(r, 25));
+        inFlight -= 1;
+        return AGENT;
+      },
+    };
+    const done = run({ targets: ["lead"] }, deps([], client, { pollMs: 5 }));
+    await new Promise((r) => setTimeout(r, 150));
+    herdrSocket!.end();
+    await done;
+    expect(calls).toBeGreaterThan(3); // polls kept coming...
+    expect(maxInFlight).toBe(1); // ...but one at a time
+  });
+
+  it("reports a stop exactly once when slow polls straddle it", async () => {
+    await writeTranscript();
+    await fakeHerdr();
+    const lines: string[] = [];
+    let calls = 0;
+    const client = {
+      agentGet: async () => {
+        const n = ++calls;
+        if (n === 1) return AGENT;
+        await new Promise((r) => setTimeout(r, 25));
+        return n >= 3 ? { ...AGENT, status: "done" as const } : AGENT;
+      },
+    };
+    const done = run({ targets: ["lead"] }, deps(lines, client, { pollMs: 5 }));
+    await new Promise((r) => setTimeout(r, 250));
+    herdrSocket!.end();
+    await done;
+    expect(lines.filter((l) => l.startsWith("[lead] done"))).toHaveLength(1);
+  });
+
   it("never lets a slow poll overwrite a newer socket event", async () => {
     await writeTranscript();
     const herdr = await fakeHerdr();

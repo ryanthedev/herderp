@@ -83,12 +83,15 @@ export function subscribeEvents(options: SubscribeOptions): Promise<EventStream>
         const line = buffer.slice(0, newline).trim();
         buffer = buffer.slice(newline + 1);
         if (line === "") continue;
-        let message: Record<string, unknown>;
+        let parsed: unknown;
         try {
-          message = JSON.parse(line) as Record<string, unknown>;
+          parsed = JSON.parse(line);
         } catch {
           continue; // a malformed line is skipped, never fatal
         }
+        // valid JSON that isn't an object (null, a number, an array) is just as unusable
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) continue;
+        const message = parsed as Record<string, unknown>;
         if (!started) {
           const error = message.error as { code?: unknown; message?: unknown } | undefined;
           if (error) {

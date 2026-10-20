@@ -1,17 +1,24 @@
 // run.ts: the I/O half of `herderp watch`. Resolves the targets through
 // herdr, subscribes to their status events on herdr's socket, polls each
-// agent's liveness and transcript, and prints the Watcher's events - one line
-// each, flushed immediately, because the process runs under Claude Code's
-// Monitor tool, where every stdout line becomes a notification.
+// agent's liveness, status, and transcript, and prints the Watcher's events -
+// one line each, flushed immediately, because the process runs under Claude
+// Code's Monitor tool, where every stdout line becomes a notification.
 //
 // Activity signal: an agent's Claude Code transcript
 // (~/.claude/projects/<slug>/<sessionId>.jsonl) is written within seconds of
 // every step it takes, so its mtime is the heartbeat stall detection reads.
 // The session id is re-read from herdr on every poll (it changes on /clear).
 //
+// Status comes from two places. The socket is authoritative and immediate;
+// polls reconcile anything it missed - a stop between the first lookup and
+// the subscription, or a dropped event. A poll's answer is applied only if no
+// socket event arrived for that pane while the poll was in flight, so a slow
+// lookup can never overwrite a newer event.
+//
 // Every way the watch can end prints a line first, so silence never looks
 // like "still running": a target that won't resolve (exit 2), the event
 // stream dropping (exit 1), every target gone or `once` satisfied (exit 0).
+// With `json`, every line - including those - is one JSON object.
 
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -49,7 +56,7 @@ export interface RunWatchDeps {
   /** The agent's last assistant text, for stop summaries. */
   readLastState: (sessionId: string, cwd: string) => Promise<string | undefined>;
   now?: () => number;
-  /** Liveness/activity poll interval. Default 15s. */
+  /** Liveness/status/activity poll interval. Default 15s. */
   pollMs?: number;
   /** How long to let a stopped agent's transcript catch up before summarizing. Default 2.5s. */
   summaryDelayMs?: number;
@@ -73,13 +80,17 @@ async function mtimeOf(path: string | null): Promise<number | null> {
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /** Watch until done; resolves with the process exit code. */
 export async function runWatch(options: RunWatchOptions, deps: RunWatchDeps): Promise<number> {
-  const { client, projectsRoot, write } = deps;
+  const { client, projectsRoot } = deps;
   const now = deps.now ?? Date.now;
   const pollMs = deps.pollMs ?? DEFAULT_POLL_MS;
   const summaryDelayMs = deps.summaryDelayMs ?? DEFAULT_SUMMARY_DELAY_MS;
+  /** Print one line: the text form, or the JSON record in json mode. */
+  const say = (text: string, record: Record<string, unknown>) =>
+    deps.write(options.json ? JSON.stringify(record) : text);
 
   // 1. Resolve every target up front; a typo fails fast, before anything is armed.
   const agents = new Map<string, { label: string; agent: Agent }>();
@@ -88,7 +99,7 @@ export async function runWatch(options: RunWatchOptions, deps: RunWatchDeps): Pr
     try {
       agent = await client.agentGet(label);
     } catch (error) {
-      write(`[${label}] not found - ${error instanceof Error ? error.message : String(error)}`);
+      say(`[${label}] not found - ${messageOf(error)}`, { type: "not_found", label, detail: messageOf(error) });
       return 2;
     }
     if (!agents.has(agent.paneId)) agents.set(agent.paneId, { label, agent });
@@ -103,8 +114,15 @@ export async function runWatch(options: RunWatchOptions, deps: RunWatchDeps): Pr
     const noStall = options.stallMs !== undefined && !hasTranscript;
     targets.push({ label, paneId, status: agent.status, noStall });
     const session = agent.sessionId ? ` (session ${agent.sessionId.slice(0, 8)})` : "";
-    const note = noStall ? " - no transcript found, stall detection off" : "";
-    write(`[${label}] watching - currently ${agent.status}${session}${note}`);
+    const note = noStall ? " - no transcript yet, stall detection starts when one appears" : "";
+    say(`[${label}] watching - currently ${agent.status}${session}${note}`, {
+      type: "watching",
+      label,
+      paneId,
+      status: agent.status,
+      ...(agent.sessionId && { sessionId: agent.sessionId }),
+      ...(options.stallMs !== undefined && { stallDetection: !noStall }),
+    });
   }
   const watcher = new Watcher(targets, startedAt, { stallMs: options.stallMs, verbose: options.verbose });
 
@@ -112,8 +130,14 @@ export async function runWatch(options: RunWatchOptions, deps: RunWatchDeps): Pr
     let stream: EventStream | undefined;
     let timer: ReturnType<typeof setInterval> | undefined;
     let finished = false;
-    // Events print in arrival order even though stop summaries are async.
+    // Events print in arrival order even though stop summaries are async;
+    // `pending` counts what is queued but not yet printed, so the watch never
+    // exits with a notification still waiting (e.g. two departures at once).
     let queue: Promise<void> = Promise.resolve();
+    let pending = 0;
+    // Per-pane count of socket status events: a poll applies its status only
+    // if this hasn't moved while it was in flight.
+    const socketSeq = new Map<string, number>();
 
     const finish = (code: number) => {
       if (finished) return;
@@ -138,19 +162,32 @@ export async function runWatch(options: RunWatchOptions, deps: RunWatchDeps): Pr
 
     const emit = (events: WatchEvent[]) => {
       for (const event of events) {
+        pending += 1;
         queue = queue.then(async () => {
           if (finished) return;
           const context = await contextFor(event);
-          write(options.json ? formatEventJson(event, context) : formatEvent(event, context));
-          if (options.once || watcher.allGone()) finish(0);
+          if (finished) return;
+          deps.write(options.json ? formatEventJson(event, context) : formatEvent(event, context));
+          pending -= 1;
+          if (options.once || (watcher.allGone() && pending === 0)) finish(0);
         });
       }
+    };
+
+    /** Queue a terminal line behind any pending notifications, then exit. */
+    const fail = (text: string, record: Record<string, unknown>) => {
+      queue = queue.then(() => {
+        if (finished) return;
+        say(text, record);
+        finish(1);
+      });
     };
 
     const onEvent = (event: HerdrEvent) => {
       if (event.event !== "pane.agent_status_changed") return;
       const paneId = event.data.pane_id;
       if (typeof paneId !== "string") return;
+      socketSeq.set(paneId, (socketSeq.get(paneId) ?? 0) + 1);
       // A null agent is the agent leaving the pane, not a status.
       if (event.data.agent === null) emit(watcher.gone(paneId, "agent exited"));
       else emit(watcher.status(paneId, toAgentStatus(event.data.agent_status), now()));
@@ -158,8 +195,10 @@ export async function runWatch(options: RunWatchOptions, deps: RunWatchDeps): Pr
 
     const poll = async () => {
       for (const paneId of watcher.livePaneIds()) {
+        const seqBefore = socketSeq.get(paneId) ?? 0;
         try {
           const agent = await client.agentGet(paneId);
+          if ((socketSeq.get(paneId) ?? 0) === seqBefore) emit(watcher.status(paneId, agent.status, now()));
           const at = await mtimeOf(transcriptPath(projectsRoot, agent));
           if (at !== null) watcher.activity(paneId, at);
         } catch (error) {
@@ -176,23 +215,28 @@ export async function runWatch(options: RunWatchOptions, deps: RunWatchDeps): Pr
       socketPath: deps.socketPath,
       subscriptions: watcher.livePaneIds().map((pane_id) => ({ type: "pane.agent_status_changed", pane_id })),
       onEvent,
-      onClose: (reason) => {
-        queue = queue.then(() => {
-          if (finished) return;
-          write(`[watch] lost herdr's event stream - ${reason}. Re-arm the watch once herdr is back.`);
-          finish(1);
-        });
-      },
+      onClose: (reason) =>
+        fail(`[watch] lost herdr's event stream - ${reason}. Re-arm the watch once herdr is back.`, {
+          type: "stream_lost",
+          detail: reason,
+        }),
     }).then(
       (s) => {
         stream = s;
-        if (finished) s.close();
-        else timer = setInterval(() => void poll(), pollMs);
+        if (finished) {
+          s.close();
+          return;
+        }
+        // Reconcile right away: catches a stop that happened between the
+        // first lookup and the subscription going live.
+        void poll();
+        timer = setInterval(() => void poll(), pollMs);
       },
-      (error: unknown) => {
-        write(`[watch] could not subscribe to herdr events - ${error instanceof Error ? error.message : String(error)}`);
-        finish(1);
-      },
+      (error: unknown) =>
+        fail(`[watch] could not subscribe to herdr events - ${messageOf(error)}`, {
+          type: "subscribe_failed",
+          detail: messageOf(error),
+        }),
     );
   });
 }

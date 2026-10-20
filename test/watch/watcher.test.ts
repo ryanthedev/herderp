@@ -75,6 +75,14 @@ describe("Watcher - stall detection", () => {
     expect(w.tick(60 * MIN)).toEqual([]);
   });
 
+  it("re-enables stall detection once the transcript shows up", () => {
+    const w = new Watcher([{ ...lead, noStall: true }], 0, { stallMs: 10 * MIN });
+    expect(w.tick(30 * MIN)).toEqual([]);
+    w.activity("w1:p1", 31 * MIN); // first transcript write
+    expect(w.tick(40 * MIN)).toEqual([]);
+    expect(w.tick(41 * MIN)).toEqual([{ type: "stalled", label: "lead", paneId: "w1:p1", status: "working", quietMs: 10 * MIN }]);
+  });
+
   it("never reports a stopped agent as stalled - it is waiting, and already reported", () => {
     const w = new Watcher([lead], 0, { stallMs: 10 * MIN });
     w.status("w1:p1", "done", 1);

@@ -47,7 +47,7 @@ The targets are resolved when you call the action, so a typo fails there, not af
 | `[cap-db] gone - agent exited` | The pane closed or the agent quit. |
 | `[watch] lost herdr's event stream - …` | herdr went away. The watch exits with status 1; re-arm it once herdr is back. |
 
-- **Options:** `once:true` exits after the first event (use it for "tell me when this one finishes"). `verbose:true` also reports agents starting to work again. `json:true` prints one JSON object per line.
+- **Options:** `once:true` exits after the first event (use it for "tell me when this one finishes"). `verbose:true` also reports agents starting to work again. `json:true` prints every line, including the start and failure lines, as one JSON object with a `type` field.
 - **Expiry:** Monitor ends a watch after 30 minutes at most. Re-arm it with the same command to keep watching.
 - **Scope:** the watch runs on this machine and subscribes to its herdr server's event stream (herdr's `events.subscribe` socket API). It doesn't take `host` yet.
 

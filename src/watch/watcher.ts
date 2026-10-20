@@ -24,7 +24,8 @@ export interface WatchTarget {
   label: string;
   paneId: string;
   status: AgentStatus;
-  /** No transcript to watch, so silence proves nothing: never report a stall. */
+  /** No transcript to watch (yet), so silence proves nothing: no stall
+   * reports until the first activity() shows one exists. */
   noStall?: boolean;
 }
 
@@ -94,10 +95,14 @@ export class Watcher {
     return report ? [{ type: "status", label: s.label, paneId, status, previous, inPreviousMs }] : [];
   }
 
-  /** The pane's transcript was written at `at` (ms). Older-than-known writes are ignored. */
+  /** The pane's transcript was written at `at` (ms). Older-than-known writes
+   * are ignored, but any write proves a transcript exists, which turns stall
+   * detection back on for a target that started without one. */
   activity(paneId: string, at: number): void {
     const s = this.panes.get(paneId);
-    if (!s || s.gone || at <= s.lastActivity) return;
+    if (!s || s.gone) return;
+    s.noStall = false;
+    if (at <= s.lastActivity) return;
     s.lastActivity = at;
     s.stallReported = false;
   }

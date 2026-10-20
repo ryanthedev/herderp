@@ -122,14 +122,95 @@ describe("runWatch", () => {
     expect(lines.at(-1)).toMatch(/^\[lead\] stalled - no activity for \d+s while working$/);
   });
 
-  it("turns stall detection off for a target with no transcript, and says so", async () => {
+  it("holds stall detection until a transcript exists, then turns it on", async () => {
     await fakeHerdr();
     const lines: string[] = [];
-    const done = run({ targets: ["lead"], stallMs: 1 }, deps(lines, {}, { pollMs: 5 }));
+    let clock = Date.now() + 60_000;
+    const done = run({ targets: ["lead"], stallMs: 30_000, once: true }, deps(lines, {}, { pollMs: 5, now: () => (clock += 10_000) }));
     await new Promise((r) => setTimeout(r, 60));
-    expect(lines).toEqual(["[lead] watching - currently working (session 11111111) - no transcript found, stall detection off"]);
-    herdrSocket!.end(); // end the watch
+    expect(lines).toEqual([
+      "[lead] watching - currently working (session 11111111) - no transcript yet, stall detection starts when one appears",
+    ]);
+    await writeTranscript(); // the agent's first write lands
+    expect(await done).toBe(0);
+    expect(lines.at(-1)).toMatch(/^\[lead\] stalled - no activity for \d+[smh][\dm]* while working$/);
+  });
+
+  it("prints every line as JSON in json mode, including the start and failure lines", async () => {
+    await writeTranscript();
+    const herdr = await fakeHerdr();
+    const lines: string[] = [];
+    const done = run({ targets: ["lead"], json: true, stallMs: 600_000 }, deps(lines));
+    herdr.push({ agent: "claude", agent_status: "done", pane_id: "w1:p1", workspace_id: "w1" });
+    await new Promise((r) => setTimeout(r, 40));
+    herdr.drop();
     expect(await done).toBe(1);
+    const records = lines.map((l) => JSON.parse(l));
+    expect(records.map((r) => r.type)).toEqual(["watching", "status", "stream_lost"]);
+    expect(records[0]).toMatchObject({ label: "lead", paneId: "w1:p1", status: "working", sessionId: SESSION, stallDetection: true });
+
+    const missing: string[] = [];
+    const client = {
+      agentGet: async () => {
+        throw new HerdrError("agent_not_found", "nope");
+      },
+    };
+    expect(await run({ targets: ["x"], json: true }, deps(missing, client))).toBe(2);
+    expect(JSON.parse(missing[0]!)).toEqual({ type: "not_found", label: "x", detail: "nope" });
+  });
+
+  it("prints every departure in a batch before exiting", async () => {
+    await writeTranscript();
+    const herdr = await fakeHerdr();
+    const lines: string[] = [];
+    const agentGet = async (target: string) =>
+      target === "cap" || target === "w1:p2" ? { ...AGENT, paneId: "w1:p2" } : AGENT;
+    const done = run({ targets: ["lead", "cap"] }, deps(lines, { agentGet }));
+    await new Promise((r) => setTimeout(r, 20));
+    // both leave in one socket write
+    herdrSocket!.write(
+      `${JSON.stringify({ event: "pane.agent_status_changed", data: { agent: null, pane_id: "w1:p1" } })}\n` +
+        `${JSON.stringify({ event: "pane.agent_status_changed", data: { agent: null, pane_id: "w1:p2" } })}\n`,
+    );
+    void herdr;
+    expect(await done).toBe(0);
+    expect(lines.slice(-2)).toEqual(["[lead] gone - agent exited", "[cap] gone - agent exited"]);
+  });
+
+  it("catches a stop that happened before the subscription went live", async () => {
+    await writeTranscript();
+    await fakeHerdr();
+    const lines: string[] = [];
+    let calls = 0;
+    // working at the first lookup; done by the time the watch reconciles
+    const client = { agentGet: async () => (++calls === 1 ? AGENT : { ...AGENT, status: "done" as const }) };
+    expect(await run({ targets: ["lead"], once: true }, deps(lines, client, { pollMs: 60_000 }))).toBe(0);
+    expect(lines.at(-1)).toMatch(/^\[lead\] done after \d+s working/);
+  });
+
+  it("never lets a slow poll overwrite a newer socket event", async () => {
+    await writeTranscript();
+    const herdr = await fakeHerdr();
+    const lines: string[] = [];
+    let calls = 0;
+    // after the first lookup, every poll answers "working" - but slowly, so the
+    // socket's "done" lands while the poll is in flight
+    const client = {
+      agentGet: async () => {
+        if (++calls === 1) return AGENT;
+        await new Promise((r) => setTimeout(r, 30));
+        return AGENT;
+      },
+    };
+    const done = run({ targets: ["lead"], verbose: true }, deps(lines, client, { pollMs: 1000 }));
+    await new Promise((r) => setTimeout(r, 10));
+    herdr.push({ agent: "claude", agent_status: "done", pane_id: "w1:p1", workspace_id: "w1" });
+    await new Promise((r) => setTimeout(r, 120));
+    herdr.drop();
+    await done;
+    const statusLines = lines.filter((l) => !l.includes("watching") && !l.startsWith("[watch]"));
+    expect(statusLines).toHaveLength(1);
+    expect(statusLines[0]).toMatch(/^\[lead\] done/); // no stale "working again" after it
   });
 
   it("reports a target that disappears from herdr between polls", async () => {

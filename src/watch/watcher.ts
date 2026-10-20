@@ -107,6 +107,17 @@ export class Watcher {
     s.stallReported = false;
   }
 
+  /** The pane moved to a new session (/clear, restart): the old transcript's
+   * heartbeat no longer says anything, so restart the quiet clock and - when
+   * the new session has no transcript yet - hold stall reports until it does. */
+  sessionChanged(paneId: string, now: number, hasTranscript: boolean): void {
+    const s = this.panes.get(paneId);
+    if (!s || s.gone) return;
+    s.lastActivity = now;
+    s.stallReported = false;
+    if (!hasTranscript) s.noStall = true;
+  }
+
   /** The agent is gone (pane closed, agent exited, target no longer resolves). */
   gone(paneId: string, detail: string): WatchEvent[] {
     const s = this.panes.get(paneId);

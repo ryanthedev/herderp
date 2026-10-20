@@ -83,6 +83,21 @@ describe("Watcher - stall detection", () => {
     expect(w.tick(41 * MIN)).toEqual([{ type: "stalled", label: "lead", paneId: "w1:p1", status: "working", quietMs: 10 * MIN }]);
   });
 
+  it("holds stall reports after a session switch until the new transcript appears", () => {
+    const w = new Watcher([lead], 0, { stallMs: 10 * MIN });
+    w.sessionChanged("w1:p1", 5 * MIN, false); // /clear into a session with no transcript yet
+    expect(w.tick(60 * MIN)).toEqual([]);
+    w.activity("w1:p1", 61 * MIN);
+    expect(w.tick(71 * MIN)).toHaveLength(1);
+  });
+
+  it("restarts the quiet clock on a session switch to an existing transcript", () => {
+    const w = new Watcher([lead], 0, { stallMs: 10 * MIN });
+    w.sessionChanged("w1:p1", 8 * MIN, true);
+    expect(w.tick(17 * MIN)).toEqual([]);
+    expect(w.tick(18 * MIN)).toHaveLength(1);
+  });
+
   it("never reports a stopped agent as stalled - it is waiting, and already reported", () => {
     const w = new Watcher([lead], 0, { stallMs: 10 * MIN });
     w.status("w1:p1", "done", 1);

@@ -214,6 +214,41 @@ describe("runWatch", () => {
     expect(lines.at(-1)).toContain('last: "reply from 11111111" (session 11111111)');
   });
 
+  it("drops the summary when the pane switched sessions before the stop could be attributed", async () => {
+    await writeTranscript();
+    const herdr = await fakeHerdr();
+    const lines: string[] = [];
+    const NEW = "22222222-2222-2222-2222-222222222222";
+    let calls = 0;
+    // SESSION at resolve and at the first reconcile poll; by the time the stop
+    // is looked up (3rd lookup), the pane already holds NEW
+    const client = { agentGet: async () => (++calls <= 2 ? AGENT : { ...AGENT, sessionId: NEW }) };
+    const done = run({ targets: ["lead"], once: true }, deps(lines, client, { pollMs: 60_000 }));
+    await new Promise((r) => setTimeout(r, 20));
+    herdr.push({ agent: "claude", agent_status: "done", pane_id: "w1:p1", workspace_id: "w1" });
+    await done;
+    expect(lines.at(-1)).toMatch(/^\[lead\] done after \d+s working$/); // no summary, no session - uncertain
+  });
+
+  it("does not report a stall after rolling over to a session with no transcript yet", async () => {
+    await writeTranscript();
+    await fakeHerdr();
+    const lines: string[] = [];
+    const NEW = "22222222-2222-2222-2222-222222222222";
+    let calls = 0;
+    let clock = Date.now() + 60_000;
+    // after the first lookup the pane is in NEW, which has no transcript
+    const client = { agentGet: async () => (++calls === 1 ? AGENT : { ...AGENT, sessionId: NEW }) };
+    const done = run(
+      { targets: ["lead"], stallMs: 30_000 },
+      deps(lines, client, { pollMs: 5, now: () => (clock += 10_000) }),
+    );
+    await new Promise((r) => setTimeout(r, 120));
+    herdrSocket!.end();
+    await done;
+    expect(lines.some((l) => l.includes("stalled"))).toBe(false);
+  });
+
   it("never runs polls on top of each other", async () => {
     await writeTranscript();
     await fakeHerdr();

@@ -125,6 +125,9 @@ export async function runWatch(options: RunWatchOptions, deps: RunWatchDeps): Pr
     });
   }
   const watcher = new Watcher(targets, startedAt, { stallMs: options.stallMs, verbose: options.verbose });
+  // The session each pane held at its last lookup. herdr's status events
+  // carry no session id, so this is how a session switch is noticed.
+  const knownSession = new Map([...agents].map(([paneId, { agent }]) => [paneId, agent.sessionId]));
 
   return await new Promise<number>((resolve) => {
     let stream: EventStream | undefined;
@@ -149,16 +152,19 @@ export async function runWatch(options: RunWatchOptions, deps: RunWatchDeps): Pr
 
     /**
      * A stop's summary. Started the moment the event is emitted - not when the
-     * queue reaches it - so the session it quotes is the one in the pane when
-     * the agent stopped, even if a /clear or restart follows before the line
-     * prints. If that identity can't be read, the line goes out without one.
+     * queue reaches it - so a /clear after the lookup can't swap the session
+     * it quotes. herdr's stop event names no session, so the lookup must agree
+     * with the session last seen in that pane; if the pane switched sessions
+     * in between, which session stopped is uncertain and the line goes out
+     * without a summary rather than with a possibly wrong one.
      */
     const contextFor = async (event: WatchEvent): Promise<EventContext> => {
       if (event.type !== "status" || !STOPPED_STATUSES.has(event.status)) return {};
+      const expected = knownSession.get(event.paneId);
       let session: { sessionId: string; cwd: string };
       try {
         const agent = await client.agentGet(event.paneId);
-        if (agent.sessionId === "") return {};
+        if (agent.sessionId === "" || agent.sessionId !== expected) return {};
         session = { sessionId: agent.sessionId, cwd: agent.cwd };
       } catch {
         return {}; // a summary is a bonus; the event still prints
@@ -226,6 +232,10 @@ export async function runWatch(options: RunWatchOptions, deps: RunWatchDeps): Pr
           const agent = await client.agentGet(paneId);
           if ((socketSeq.get(paneId) ?? 0) === seqBefore) emit(watcher.status(paneId, agent.status, now()));
           const at = await mtimeOf(transcriptPath(projectsRoot, agent));
+          if (agent.sessionId !== knownSession.get(paneId)) {
+            knownSession.set(paneId, agent.sessionId);
+            watcher.sessionChanged(paneId, now(), at !== null);
+          }
           if (at !== null) watcher.activity(paneId, at);
         } catch (error) {
           if (error instanceof HerdrError && error.code === "agent_not_found") {

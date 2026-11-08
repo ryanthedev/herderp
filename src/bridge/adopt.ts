@@ -68,6 +68,29 @@ function assertAtRest(status: string, target: string, paneId: string): void {
   );
 }
 
+function errorText(error: unknown): string {
+  if (error instanceof Error) {
+    const code = (error as { code?: unknown }).code;
+    return typeof code === "string" ? `[${code}] ${error.message}` : error.message;
+  }
+  return String(error);
+}
+
+/** The terminal a new tab holds, when a reply named the tab but not the terminal. */
+async function findTerminal(core: CoreClient, reply: Record<string, unknown>): Promise<string | null> {
+  const tabId = replyId(reply, "tab");
+  if (tabId === null) return null;
+  try {
+    for (const space of await core.appSpaces()) {
+      const tab = space.tabs.find((t) => t.id === tabId);
+      if (tab && tab.terminals.length === 1) return tab.terminals[0]!.terminal;
+    }
+  } catch {
+    // fall through: report what is known
+  }
+  return null;
+}
+
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export async function adoptAgent(options: AdoptOptions, deps: AdoptDeps): Promise<AdoptResult> {
@@ -100,60 +123,94 @@ export async function adoptAgent(options: AdoptOptions, deps: AdoptDeps): Promis
   const reply = options.workspaceId
     ? await core.appDo("tab.new", { space: options.workspaceId, folder: agent.cwd, argv, ...(label ? { name: label } : {}) })
     : await core.appDo("space.new", { folder: agent.cwd, argv, machine: "", ...(label ? { name: label } : {}) });
-  const terminal = replyId(reply, "terminal");
+  const terminal = replyId(reply, "terminal") ?? (await findTerminal(core, reply));
   if (terminal === null) {
+    const where = [replyId(reply, "space") && `space ${replyId(reply, "space")}`, replyId(reply, "tab") && `tab ${replyId(reply, "tab")}`]
+      .filter(Boolean)
+      .join(", ");
     throw new BridgeError(
       "adopt_failed",
-      `the Herdr app did not report the new terminal (reply: ${JSON.stringify(reply)}); the herdr pane ${agent.paneId} was left open`,
+      `the Herdr app did not report the new terminal (reply: ${JSON.stringify(reply)}). A \`claude --resume ${agent.sessionId}\` may be running${where ? ` in ${where}` : ""} - check it and close one copy; the herdr pane ${agent.paneId} was left open`,
     );
   }
 
-  // 3. Wait for it to come up: a status report plus a Claude session.
-  const deadline = now() + readyTimeoutMs;
-  let resumed: string | null = null;
-  let lastSeen = "no answer";
-  for (;;) {
-    try {
-      const t = await core.terminalGet(terminal);
-      if (t.state !== "live") {
-        lastSeen = `its program ended (${t.state})`;
-        break;
-      }
-      resumed = t.status !== null ? await sessions(t) : null;
-      lastSeen = t.status === null ? "no status yet" : resumed === null ? `status ${t.status}, no session yet` : "up";
-      if (resumed !== null) break;
-    } catch (error) {
-      if (!(error instanceof CoreError)) throw error;
-      lastSeen = `[${error.code}] ${error.message}`;
-      if (error.code === "not_found") break;
-    }
-    if (now() >= deadline) break;
-    await sleep(readyPollMs);
-  }
-
-  if (resumed === null) {
+  // From here until the old pane is closed, every way out closes the NEW
+  // terminal, and says truthfully whether that worked.
+  const closeNew = async (): Promise<string> => {
     try {
       await core.appDo("terminal.kill", { terminal });
-    } catch {
-      // best effort: it may already be gone
+      return `the new Herdr app terminal ${terminal} was closed`;
+    } catch (error) {
+      return `the new Herdr app terminal ${terminal} could NOT be closed (${errorText(error)}) - close it by hand, two Claude processes may share the session`;
     }
-    throw new BridgeError(
-      "adopt_failed",
-      `the resumed session in Herdr app terminal ${terminal} did not come up (${lastSeen}); it was closed and the herdr pane ${agent.paneId} was left as it was`,
-    );
+  };
+
+  let resumed: string | null = null;
+  try {
+    // 3. Wait for it to come up: a status report plus a Claude session.
+    const deadline = now() + readyTimeoutMs;
+    let lastSeen = "no answer";
+    for (;;) {
+      try {
+        const t = await core.terminalGet(terminal);
+        if (t.state !== "live") {
+          lastSeen = `its program ended (${t.state})`;
+          break;
+        }
+        resumed = t.status !== null ? await sessions(t) : null;
+        lastSeen = t.status === null ? "no status yet" : resumed === null ? `status ${t.status}, no session yet` : "up";
+        if (resumed !== null) break;
+      } catch (error) {
+        if (!(error instanceof CoreError)) throw error;
+        lastSeen = `[${error.code}] ${error.message}`;
+        if (error.code === "not_found") break;
+      }
+      if (now() >= deadline) break;
+      await sleep(readyPollMs);
+    }
+    if (resumed === null) {
+      throw new BridgeError(
+        "adopt_failed",
+        `the resumed session in Herdr app terminal ${terminal} did not come up (${lastSeen}); ${await closeNew()}, and the herdr pane ${agent.paneId} was left as it was`,
+      );
+    }
+
+    // 4. Close the old pane only if a fresh look proves it is still the same
+    // Claude session, at rest. Anything else - busy, a different session
+    // after /clear, a different program, or no answer - keeps the old pane.
+    let before: Awaited<ReturnType<HerdrClient["agentGet"]>> | null = null;
+    let recheck = "";
+    try {
+      before = await herdr.agentGet(agent.paneId);
+    } catch (error) {
+      recheck = errorText(error);
+    }
+    const unchanged = before !== null && before.agent === "claude" && before.sessionId === agent.sessionId && AT_REST.has(before.status);
+    if (!unchanged) {
+      const what =
+        before === null
+          ? `could not be checked again (${recheck})`
+          : before.sessionId !== agent.sessionId || before.agent !== "claude"
+            ? `now runs something else (${before.agent || "no agent"}, session ${before.sessionId || "none"})`
+            : `started ${before.status}`;
+      throw new BridgeError(
+        "agent_busy",
+        `herdr agent ${agent.paneId} ${what} while the session was being resumed; ${await closeNew()}, and the herdr pane was left running`,
+      );
+    }
+  } catch (error) {
+    if (error instanceof BridgeError) throw error;
+    throw new BridgeError("adopt_failed", `adopt failed while bringing up ${terminal} (${errorText(error)}); ${await closeNew()}, and the herdr pane ${agent.paneId} was left as it was`);
   }
 
-  // 4. Only now close the old pane - unless someone set it working meanwhile,
-  // in which case the new one goes and the old one keeps its turn.
-  const before = await herdr.agentGet(agent.paneId).catch(() => null);
-  if (before !== null && before.sessionId === agent.sessionId && !AT_REST.has(before.status)) {
-    await core.appDo("terminal.kill", { terminal }).catch(() => undefined);
+  try {
+    await herdr.paneClose(agent.paneId);
+  } catch (error) {
     throw new BridgeError(
-      "agent_busy",
-      `herdr agent ${agent.paneId} started ${before.status} while the session was being resumed; the new Herdr app terminal ${terminal} was closed and the herdr pane left running`,
+      "adopt_failed",
+      `the session runs in Herdr app terminal ${terminal}, but closing the herdr pane ${agent.paneId} failed (${errorText(error)}): ${await closeNew()}; check the herdr pane before trying again`,
     );
   }
-  await herdr.paneClose(agent.paneId);
 
   const fresh = await core.terminalGet(terminal).catch(() => null);
   return {

@@ -17,12 +17,11 @@ describe("engineOfId", () => {
     expect(engineOfId("w8:pG")).toBe("herdr");
     expect(engineOfId("w8:tD")).toBe("herdr");
     expect(engineOfId("term_65f05a922b1be7a")).toBe("herdr");
-    expect(engineOfId("ska/t3s")).toBe("core");
   });
 
   it("leaves bare words to resolution - including names that start with w or look like core addresses", () => {
     // Regression: `wprobe3` was routed to herdr as a workspace id.
-    for (const name of ["wprobe3", "web", "w8", "t3s", "review", "cmd-qa"]) expect(engineOfId(name)).toBeNull();
+    for (const name of ["wprobe3", "web", "w8", "t3s", "review", "cmd-qa", "ska/t3s", "api/fix"]) expect(engineOfId(name)).toBeNull();
   });
 
   it("uses full layout shapes for layout ids", () => {
@@ -40,7 +39,8 @@ describe("homeEngine / pickEngine", () => {
   it("follows the caller's own terminal", () => {
     expect(homeEngine({ HC_TERMINAL_ID: "t3" })).toBe("core");
     expect(homeEngine({ HERDR_WORKSPACE_ID: "w1" })).toBe("herdr");
-    expect(homeEngine({ HC_TERMINAL_ID: "t3", HERDR_WORKSPACE_ID: "w1" })).toBe("core");
+    // A herdr server started from a Herdr app terminal passes HC_TERMINAL_ID on; herdr is innermost.
+    expect(homeEngine({ HC_TERMINAL_ID: "t3", HERDR_WORKSPACE_ID: "w1" })).toBe("herdr");
     expect(homeEngine({})).toBe("core");
   });
 
@@ -48,6 +48,13 @@ describe("homeEngine / pickEngine", () => {
     expect(pickEngine("herdr", [SPACE], { HC_TERMINAL_ID: "t1" })).toBe("herdr");
     expect(pickEngine(undefined, [undefined, "w3"], { HC_TERMINAL_ID: "t1" })).toBe("herdr");
     expect(pickEngine(undefined, [undefined, ""], { HERDR_WORKSPACE_ID: "w1" })).toBe("herdr");
+  });
+
+  it("a remote host means herdr unless an id or engine says core", () => {
+    expect(pickEngine(undefined, [], { HC_TERMINAL_ID: "t1" }, "devbox")).toBe("herdr");
+    expect(pickEngine(undefined, [], { HC_TERMINAL_ID: "t1" }, "local")).toBe("core");
+    expect(pickEngine(undefined, [SPACE], {}, "devbox")).toBe("core");
+    expect(pickEngine("core", [], {}, "devbox")).toBe("core");
   });
 
   it("qualifyCore prefixes a host, leaves local and qualified ids alone", () => {
@@ -69,7 +76,8 @@ const coreMissing = async () => {
 const herdrMissing = async () => {
   throw new HerdrError("agent_not_found", "not found");
 };
-const found = async () => ({});
+const found = async () => ({ state: "live" });
+const finished = async () => ({ state: "finished" });
 
 describe("resolveAgentTarget", () => {
   it("takes a shape-decided target straight to its engine, qualifying core with host", async () => {
@@ -99,11 +107,31 @@ describe("resolveAgentTarget", () => {
     expect(error.message).toContain("socket_unreachable");
   });
 
-  it("a hit in the live engine wins over a down one", async () => {
+  it("a hit in the live engine answers reads while the other is down, but never changes", async () => {
     const down = async () => {
       throw new CoreError("core_unreachable", "down");
     };
     expect(await resolveAgentTarget("x", {}, deps(down, found))).toEqual({ engine: "herdr", target: "x" });
+    const error = await resolveAgentTarget("x", { mutating: true }, deps(down, found)).catch((e) => e);
+    expect(error.code).toBe("target_unresolved");
+    expect(error.message).toContain("core_unreachable");
+    expect(await resolveAgentTarget("x", { mutating: true, engine: "herdr" }, deps(down, found))).toEqual({ engine: "herdr", target: "x" });
+  });
+
+  it("a finished core terminal loses to a live herdr agent, but answers alone", async () => {
+    expect(await resolveAgentTarget("x", {}, deps(finished, found))).toEqual({ engine: "herdr", target: "x" });
+    expect(await resolveAgentTarget("x", {}, deps(finished, herdrMissing))).toEqual({ engine: "core", target: "x" });
+  });
+
+  it("a name with a slash is asked of both engines", async () => {
+    expect(await resolveAgentTarget("api/fix", {}, deps(coreMissing, found))).toEqual({ engine: "herdr", target: "api/fix" });
+  });
+
+  it("an unknown herdr host is a miss, not an outage", async () => {
+    const unknownHost = async () => {
+      throw new HerdrError("unknown_host", "no such host");
+    };
+    expect((await resolveAgentTarget("x", { host: "ska" }, deps(coreMissing, unknownHost)).catch((e) => e)).code).toBe("target_not_found");
   });
 
   it("lets a programming fault through", async () => {

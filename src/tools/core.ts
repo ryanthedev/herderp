@@ -94,6 +94,7 @@ export interface CoreTabRow {
   number: number;
   active: boolean;
   terminals: string[];
+  machine: string | null;
 }
 
 export interface CorePaneRow {
@@ -105,6 +106,7 @@ export interface CorePaneRow {
   agent: string;
   status: string | null;
   name: string | null;
+  machine: string | null;
 }
 
 export function spaceRow(space: AppSpace): CoreSpaceRow {
@@ -129,6 +131,7 @@ export function tabRows(space: AppSpace): CoreTabRow[] {
     number: index + 1,
     active: tab.active,
     terminals: tab.terminals.map((t) => t.terminal),
+    machine: space.machine,
   }));
 }
 
@@ -143,6 +146,7 @@ export function paneRows(space: AppSpace): CorePaneRow[] {
       agent: t.app ?? "",
       status: t.status,
       name: t.name,
+      machine: space.machine,
     })),
   );
 }

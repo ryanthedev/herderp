@@ -24,17 +24,17 @@ const CORE_LAYOUT_RE = /^(?:[A-Za-z0-9._-]+\/)?(?:sp|tb|p)[0-9a-f]{32}$/;
 /**
  * The engine an id belongs to by its shape alone, or null when its shape is
  * shared. `kind` matters: an agent target can be any name, so only shapes no
- * name takes decide it (`w8:pG`, `term_...`, `machine/...`) - `wprobe` is a
- * name, not a herdr workspace id. Layout ids (workspace/space, tab, pane) are
- * never names, so their full shapes count.
- * `machine/...` is always core: herdr names hosts through `host`, never a prefix.
+ * name takes decide it (`w8:pG`, `term_...`) - `wprobe` is a name, not a
+ * herdr workspace id, and `api/fix` could be a herdr name as well as a core
+ * `machine/name`, so both are looked up. Layout ids (workspace/space, tab,
+ * pane) are never names, so their full shapes count, and a `machine/` prefix
+ * there is core (herdr names hosts through `host`, never a prefix).
  */
 export function engineOfId(id: string, kind: "agent" | "layout" = "agent"): Engine | null {
   const trimmed = id.trim();
   if (HERDR_SUB_RE.test(trimmed) || HERDR_TERMINAL_RE.test(trimmed)) return "herdr";
-  if (trimmed.includes("/")) return "core";
   if (kind === "layout") {
-    if (CORE_LAYOUT_RE.test(trimmed)) return "core";
+    if (CORE_LAYOUT_RE.test(trimmed) || trimmed.includes("/")) return "core";
     if (HERDR_WORKSPACE_RE.test(trimmed)) return "herdr";
   }
   return null;
@@ -47,23 +47,33 @@ export function engineOfId(id: string, kind: "agent" | "layout" = "agent"): Engi
  * Neither set: core, the engine the desktop app runs on.
  */
 export function homeEngine(env: NodeJS.ProcessEnv = process.env): Engine {
-  if (env.HC_TERMINAL_ID) return "core";
+  // herdr first: a herdr server started from a Herdr app terminal hands its
+  // panes that terminal's HC_TERMINAL_ID too, and the innermost engine is herdr.
   if (env.HERDR_WORKSPACE_ID || env.HERDR_PANE_ID) return "herdr";
+  if (env.HC_TERMINAL_ID) return "core";
   return "core";
 }
 
 /**
  * Picks the engine for a layout call (or one creating something): an explicit
- * `engine` wins; then the first layout id whose shape decides it; then the
- * caller's home engine.
+ * `engine` wins; then the first layout id whose shape decides it; then a
+ * remote `host`, which means herdr (herderp's hosts.json is herdr's - a remote
+ * Herdr app machine is reached by its `machine/` ids or engine:"core");
+ * then the caller's home engine.
  */
-export function pickEngine(explicit: Engine | undefined, ids: Array<string | undefined>, env?: NodeJS.ProcessEnv): Engine {
+export function pickEngine(
+  explicit: Engine | undefined,
+  ids: Array<string | undefined>,
+  env?: NodeJS.ProcessEnv,
+  host?: string,
+): Engine {
   if (explicit) return explicit;
   for (const id of ids) {
     if (id === undefined || id === "") continue;
     const engine = engineOfId(id, "layout");
     if (engine) return engine;
   }
+  if (host !== undefined && host !== "" && host !== "local") return "herdr";
   return homeEngine(env);
 }
 

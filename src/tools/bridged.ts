@@ -21,6 +21,7 @@ import { adoptAgent } from "../bridge/adopt.js";
 import { planBridgedWatch } from "../watch/command.js";
 import type { BridgeDeps } from "./curated.js";
 import {
+  onHost,
   coreAgentRow,
   coreAgents,
   corePane,
@@ -67,9 +68,10 @@ async function both<H, C>(
   const degraded: Degraded[] = [];
   const [h, c] = await Promise.all([half("herdr", herdrRows, degraded), half("core", coreRows, degraded)]);
   if (degraded.length === 2) {
+    const of = (engine: Engine) => degraded.find((d) => d.engine === engine)!;
     throw new CoreError(
       "engines_unreachable",
-      `neither engine answered - herdr: [${degraded[0]!.code}] ${degraded[0]!.message}; core: [${degraded[1]!.code}] ${degraded[1]!.message}`,
+      `neither engine answered - herdr: [${of("herdr").code}] ${of("herdr").message}; core: [${of("core").code}] ${of("core").message}`,
     );
   }
   return { rows: [...h, ...c], degraded };
@@ -139,7 +141,7 @@ export function agentRoute(args: AgentArgs, env?: NodeJS.ProcessEnv): Route {
     case "adopt":
       return "core"; // both handled in coreAgentTool: watch spans engines, adopt is herdr -> core
     case "start":
-      return pickEngine(args.engine, [args.paneId, args.workspaceId], env);
+      return pickEngine(args.engine, [args.paneId, args.workspaceId], env, args.host);
     default:
       if (args.engine) return args.engine;
       if (args.target === undefined || args.target === "") return "herdr"; // let the herdr handler name the missing field
@@ -195,7 +197,11 @@ export function coreAgentTool(bridge: BridgeDeps) {
     let target: string | undefined = args.target;
     let engine: Engine = route === "core" ? "core" : "herdr";
     if (route === "resolve") {
-      const resolved = await resolveAgentTarget(need(args.target, "target", tool, args.action), { host: args.host }, resolveDeps(herdr));
+      const resolved = await resolveAgentTarget(
+        need(args.target, "target", tool, args.action),
+        { host: args.host, mutating: !READ_ONLY_ACTIONS.has(args.action) },
+        resolveDeps(herdr),
+      );
       engine = resolved.engine;
       target = resolved.target;
     } else if (route === "core" && target !== undefined) {
@@ -221,6 +227,7 @@ export function coreAgentTool(bridge: BridgeDeps) {
       case "get":
         return { agent: await coreAgentRow(await core.terminalGet(t()), sessions) };
       case "read": {
+        rejectFields(args, [["source", isSet], ["format", isSet], ["ansi", isSet]], tool, action);
         const read = await core.terminalRead(t(), { lines: args.lines });
         return {
           engine: "core",
@@ -277,12 +284,25 @@ export function coreAgentTool(bridge: BridgeDeps) {
       }
       case "start": {
         const kind = need(args.kind, "kind", tool, "start");
-        const reply = await core.appDo("terminal.open", {
-          argv: [kind, ...(args.argv ?? [])],
-          ...(args.cwd ? { folder: args.cwd } : {}),
-          ...(args.place ? { place: args.place } : {}),
-          ...(args.name ? { name: args.name } : {}),
-        });
+        rejectFields(args, [["paneId", isSet], ["timeoutMs", isSet]], tool, action);
+        const argv = [kind, ...(args.argv ?? [])];
+        // A space means a new tab there (terminal.open only opens beside the focused pane).
+        if (args.workspaceId && args.place && args.place !== "tab") {
+          throw new CoreError("unsupported_on_core", `${tool}{action:"start"}: with workspaceId the Herdr app opens a new tab - drop place, or drop workspaceId to split beside the focused pane`);
+        }
+        const reply = args.workspaceId
+          ? await core.appDo("tab.new", {
+              space: args.workspaceId,
+              argv,
+              ...(args.cwd ? { folder: args.cwd } : {}),
+              ...(args.name ? { name: args.name } : {}),
+            })
+          : await core.appDo("terminal.open", {
+              argv,
+              ...(args.cwd ? { folder: args.cwd } : {}),
+              ...(args.place ? { place: args.place } : {}),
+              ...(args.name ? { name: args.name } : {}),
+            });
         const terminal = replyId(reply, "terminal");
         return ok(
           terminal
@@ -300,6 +320,20 @@ export function coreAgentTool(bridge: BridgeDeps) {
     }
   }
 }
+
+/** Actions that only look: a bare name found while the other engine is down may still answer these. */
+const READ_ONLY_ACTIONS: ReadonlySet<string> = new Set(["get", "read", "wait", "explain"]);
+
+/** Fails a call that sets a field the Herdr app can't honor, instead of silently dropping it. */
+function rejectFields(args: Record<string, unknown>, fields: Array<[string, (v: unknown) => boolean]>, tool: string, action: string): void {
+  for (const [field, set] of fields) {
+    if (args[field] !== undefined && set(args[field])) {
+      throw new CoreError("unsupported_on_core", `${tool}{action:"${action}"}: the Herdr app has no "${field}" here - drop it, or pass engine:"herdr"`);
+    }
+  }
+}
+const isSet = () => true;
+const isFalse = (v: unknown) => v === false;
 
 const LIST_HINT =
   "address any of these with target=<its target>, e.g. herdr_agent{action:'read',target}; engine says which engine runs it";
@@ -320,7 +354,7 @@ export interface LayoutArgs {
 export function layoutRoute(args: LayoutArgs, env?: NodeJS.ProcessEnv): Route {
   const scoped = args.paneId ?? args.tabId ?? args.workspaceId;
   if (args.action === "list" && !args.engine && scoped === undefined) return "both";
-  return pickEngine(args.engine, [args.paneId, args.tabId, args.workspaceId, args.sourcePaneId as string | undefined], env);
+  return pickEngine(args.engine, [args.paneId, args.tabId, args.workspaceId, args.sourcePaneId as string | undefined], env, args.host);
 }
 
 export function corePaneTool(bridge: BridgeDeps) {
@@ -333,11 +367,11 @@ export function corePaneTool(bridge: BridgeDeps) {
         if (route === "both") {
           const { rows, degraded } = await both(
             async () => tagged(await (await herdr()).client.paneList()),
-            () => corePanes(core),
+            async () => onHost(await corePanes(core), args.host),
           );
           return withDegraded({ panes: rows, hint: PANE_HINT }, degraded);
         }
-        return { panes: await corePanes(core, args.workspaceId), hint: PANE_HINT };
+        return { panes: onHost(await corePanes(core, args.workspaceId), args.host), hint: PANE_HINT };
       }
       case "get":
         return { pane: await corePane(core, paneId()) };
@@ -356,6 +390,7 @@ export function corePaneTool(bridge: BridgeDeps) {
         return ok("focus moved");
       case "split": {
         const direction = need(args.splitDirection as string | undefined, "splitDirection", tool, "split");
+        rejectFields(args, [["env", isSet], ["ratio", isSet], ["focus", isFalse]], tool, "split");
         if (args.cwd) {
           // pane.split has no folder; terminal.open does, beside the FOCUSED pane - so focus first.
           if (args.paneId) await core.appDo("pane.focus", { pane: args.paneId });
@@ -396,14 +431,18 @@ export function coreTabTool(bridge: BridgeDeps) {
     switch (args.action) {
       case "list": {
         if (route === "both") {
-          const { rows, degraded } = await both(async () => tagged(await (await herdr()).client.tabList()), () => coreTabs(core));
+          const { rows, degraded } = await both(
+            async () => tagged(await (await herdr()).client.tabList()),
+            async () => onHost(await coreTabs(core), args.host),
+          );
           return withDegraded({ tabs: rows }, degraded);
         }
-        return { tabs: await coreTabs(core, args.workspaceId) };
+        return { tabs: onHost(await coreTabs(core, args.workspaceId), args.host) };
       }
       case "get":
         return { tab: await coreTab(core, tabId()) };
       case "create": {
+        rejectFields(args, [["focus", isFalse]], tool, "create");
         const reply = await core.appDo("tab.new", {
           ...(args.workspaceId ? { space: args.workspaceId } : {}),
           ...(args.cwd ? { folder: args.cwd } : {}),
@@ -447,6 +486,7 @@ export function coreWorkspaceTool(bridge: BridgeDeps) {
       case "get":
         return { workspace: await coreSpace(core, id()) };
       case "create": {
+        rejectFields(args, [["focus", isFalse]], tool, "create");
         const host = args.host && args.host !== "local" ? args.host : undefined;
         const reply = await core.appDo("space.new", {
           folder: need(args.cwd as string | undefined, "cwd", tool, "create"),

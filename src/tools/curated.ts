@@ -120,11 +120,19 @@ export interface BridgeDeps {
 
 const ENGINE = z.enum(["herdr", "core"]);
 
+/** herdr_agent's actions that exist only with herdr-core in play. */
+const BRIDGE_AGENT_DOC =
+  "- interrupt: stop the agent's current turn, not the process (target). Core reports what happened; herdr presses esc.\n" +
+  "- adopt: move a Claude session from a herdr pane into the Herdr app (target = the herdr agent; optional workspaceId = a Herdr app space id to add it as a tab, else a new space named label or after the herdr workspace). It resumes the session there (claude --resume) and closes the old pane once the new one is up. Refuses unless the agent is idle or done; if the new one doesn't come up, or the old one changes meanwhile, the old pane stays and the new one is closed.\n" +
+  "On core (Herdr app): read takes lines (0 = screen only, fast; no source/format/ansi); prompt/wait wait until the agent stops working (no until); start opens a terminal (kind + optional argv/cwd/place/name, or workspaceId for a new tab there; no paneId/timeoutMs); rename and explain are herdr only.\n";
+
 const ENGINE_DOC =
   "\nTwo engines: the herdr TUI server ('herdr') and herdr-core, which runs the Herdr desktop app's terminals ('core'). " +
   "Lists cover both, each row tagged `engine`; one engine being down leaves the other's rows plus `degraded`. " +
-  "An id's shape picks its engine (core: t3s, ska/t3s, sp…/tb…/p… ids; herdr: w8, w8:pG, w8:tD), a bare name is looked up in both, " +
-  "and calls that create something go to the engine you run in. Optional `engine` forces one.";
+  "Layout ids pick their engine by shape (core: sp…/tb…/p…, optionally machine/-prefixed; herdr: w8, w8:tD, w8:pG). An agent target " +
+  "like w8:pG or term_… is herdr; anything else (a name, t3s, ska/t3s) is looked up in both - found in both is refused as ambiguous, " +
+  "and if one engine can't be asked, only get/read/wait act on the other's match. Calls that create something go to the engine you run in " +
+  "(a remote host means herdr). Optional `engine` forces one.";
 
 /**
  * Registers the curated herdr tools on `server`. Each call resolves its
@@ -184,9 +192,7 @@ export function registerCuratedTools(server: McpServer, clients: ClientResolver,
       "- start: run an agent binary in an EXISTING pane (name, kind, paneId; optional timeoutMs, argv). herdr does not make the pane - create one with herdr_pane{action:'split'} or herdr_workspace{action:'create'} first, and it must be at a shell prompt.\n" +
       "- wait: block until the agent reaches a state (target; optional until, timeoutMs). until takes one state or several and matches the first to arrive; omit it for any settled state (idle/done/blocked). 'done' IS accepted, and is usually what you want after prompting.\n" +
       "- explain: herdr's own diagnosis of how it detected this agent's state (target) - reach for it when a reported status looks wrong. herdr only.\n" +
-      "- interrupt: stop the agent's current turn, not the process (target). Core reports what happened; herdr presses esc.\n" +
-      "- adopt: move a Claude session from a herdr pane into the Herdr app (target = the herdr agent; optional workspaceId = a Herdr app space id to add it as a tab, else a new space named label or after the herdr workspace). It resumes the session there (claude --resume) and closes the old pane once the new one is up. Refuses while the agent is working or blocked; if the new one doesn't come up, the old pane stays and the new one is closed.\n" +
-      "On core (Herdr app): read takes lines (0 = screen only, fast); prompt/wait wait until the agent stops working (no until); start opens a terminal (kind + optional argv/cwd/place/name, no paneId); rename and explain are herdr only.\n" +
+      (bridge ? BRIDGE_AGENT_DOC : "") +
       "- watch: get notified while you keep working - when agents stop (done/idle/blocked, with their last message), stall, or go away (target, or targets for several; optional stallMs, once, json, verbose). Returns a command to pass to the Monitor tool, which turns each line it prints into a notification. This machine only - not with host.\n" +
       "`target` accepts a terminal id, a unique agent name, a detected agent label, or a legacy pane id.",
     inputSchema: {
@@ -204,7 +210,7 @@ export function registerCuratedTools(server: McpServer, clients: ClientResolver,
       name: z.string().optional(),
       clear: z.boolean().optional(),
       source: AGENT_READ_SOURCE.optional(),
-      lines: z.number().int().positive().optional(),
+      lines: z.number().int().nonnegative().optional(),
       format: AGENT_READ_FORMAT.optional(),
       ansi: z.boolean().optional(),
       wait: z.boolean().optional(),
@@ -231,6 +237,7 @@ export function registerCuratedTools(server: McpServer, clients: ClientResolver,
         case "get":
           return { agent: await client.agentGet(need(args.target, "target", tool, "get")) };
         case "read":
+          if (args.lines === 0) throw new Error(`${tool}{action:"read"} on herdr needs lines of at least 1 (0 = screen only is a Herdr app option)`);
           return {
             text: await client.agentRead(need(args.target, "target", tool, "read"), {
               source: args.source,
@@ -272,6 +279,9 @@ export function registerCuratedTools(server: McpServer, clients: ClientResolver,
           );
         }
         case "start": {
+          if (args.cwd !== undefined || args.place !== undefined || args.workspaceId !== undefined) {
+            throw new Error(`${tool}{action:"start"} on herdr runs in an existing pane (paneId) - cwd, place and workspaceId are Herdr app options`);
+          }
           const name = need(args.name, "name", tool, "start");
           await client.agentStart({
             name,

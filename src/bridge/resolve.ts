@@ -7,8 +7,12 @@
 //   - found in both: `ambiguous_target`, naming both, so the caller retries
 //     with `engine` (or a qualified id) instead of driving the wrong agent;
 //   - found in neither: `target_not_found`, with each engine's own answer.
-// An engine that is down doesn't block the other: a hit in the live one wins,
-// and a miss everywhere reports which engine could not be asked.
+// An engine that couldn't be asked might hold the real agent, so a hit in the
+// other one is used only for reading (get/read/wait/watch); anything that
+// changes an agent is refused with `target_unresolved` until `engine` names
+// one. A finished core terminal counts as a weak hit: it loses to a live
+// herdr agent, but still answers when nothing else does (its output can be
+// read after it ends).
 
 import type { CoreClient } from "../core/client.js";
 import { CoreError } from "../core/types.js";
@@ -17,7 +21,7 @@ import { HerdrError } from "../herdr/types.js";
 import { engineOfId, qualifyCore, type Engine } from "./route.js";
 
 /** Codes that mean "asked, and it isn't there" - anything else means "couldn't ask". */
-const NOT_FOUND_CODES: ReadonlySet<string> = new Set(["not_found", "agent_not_found", "pane_not_found"]);
+const NOT_FOUND_CODES: ReadonlySet<string> = new Set(["not_found", "agent_not_found", "pane_not_found", "unknown_host", "machine_unknown"]);
 
 export class BridgeError extends Error {
   readonly code: string;
@@ -35,12 +39,12 @@ export interface ResolvedTarget {
   target: string;
 }
 
-type Probe = { found: true } | { found: false; missing: boolean; detail: string };
+type Probe = { found: true; live: boolean } | { found: false; missing: boolean; detail: string };
 
-async function probe(run: () => Promise<unknown>): Promise<Probe> {
+async function probe(run: () => Promise<{ live: boolean }>): Promise<Probe> {
   try {
-    await run();
-    return { found: true };
+    const { live } = await run();
+    return { found: true, live };
   } catch (error) {
     if (error instanceof HerdrError || error instanceof CoreError) {
       return { found: false, missing: NOT_FOUND_CODES.has(error.code), detail: `[${error.code}] ${error.message}` };
@@ -56,7 +60,7 @@ export interface ResolveDeps {
 
 export async function resolveAgentTarget(
   target: string,
-  opts: { engine?: Engine; host?: string },
+  opts: { engine?: Engine; host?: string; mutating?: boolean },
   deps: ResolveDeps,
 ): Promise<ResolvedTarget> {
   const engine = opts.engine ?? engineOfId(target);
@@ -65,14 +69,28 @@ export async function resolveAgentTarget(
 
   const coreTarget = qualifyCore(target, opts.host);
   const [core, herdr] = await Promise.all([
-    probe(() => deps.core.terminalGet(coreTarget)),
-    probe(async () => (await deps.herdr.clientFor(opts.host)).agentGet(target)),
+    probe(async () => ({ live: (await deps.core.terminalGet(coreTarget)).state === "live" })),
+    probe(async () => {
+      await (await deps.herdr.clientFor(opts.host)).agentGet(target);
+      return { live: true };
+    }),
   ]);
+  if (core.found && !core.live && herdr.found) return { engine: "herdr", target };
   if (core.found && herdr.found) {
     throw new BridgeError(
       "ambiguous_target",
       `"${target}" names an agent in both engines - pass engine:"core" (Herdr app terminal ${coreTarget}) or engine:"herdr" (herdr agent ${target})`,
     );
+  }
+  const unasked = (p: Probe) => !p.found && !p.missing;
+  if ((core.found && unasked(herdr)) || (herdr.found && unasked(core))) {
+    const down = core.found ? herdr : core;
+    if (opts.mutating) {
+      throw new BridgeError(
+        "target_unresolved",
+        `"${target}" was found in ${core.found ? "the Herdr app (core)" : "herdr"}, but ${core.found ? "herdr" : "the Herdr app (core)"} could not be asked (${down.found ? "" : down.detail}) and may hold an agent of the same name - pass engine to act on it`,
+      );
+    }
   }
   if (core.found) return { engine: "core", target: coreTarget };
   if (herdr.found) return { engine: "herdr", target };

@@ -202,4 +202,69 @@ describe("layout tools across engines", () => {
     expect((await s.call("herdr_pane", { action: "move", paneId: PANE, destination: "new-tab" })).text).toStartWith("[unsupported_on_core]");
     expect((await s.call("herdr_pane", { action: "swap", sourcePaneId: PANE, targetPaneId: PANE })).text).toStartWith("[unsupported_on_core]");
   });
+
+  // --- regressions from the adversarial review ---------------------------------
+
+  it("a remote host keeps layout calls on herdr (hosts.json is herdr's)", async () => {
+    let split = false;
+    const s = setup({ herdr: { paneSplit: async () => void (split = true) } });
+    const { body } = await s.call("herdr_pane", { action: "split", splitDirection: "down", host: "devbox" });
+    expect(split).toBe(true);
+    expect(body).toMatchObject({ host: "devbox", engine: "herdr" });
+    expect(s.calls.some((c) => c.startsWith("app "))).toBe(false);
+  });
+
+  it("core pane and tab lists keep only the named machine's rows", async () => {
+    const { body } = await setup().call("herdr_pane", { action: "list", engine: "core", host: "ska" });
+    expect(body.panes).toEqual([]);
+    const local = await setup().call("herdr_tab", { action: "list", engine: "core", host: "local" });
+    expect(local.body.tabs.length).toBe(1);
+  });
+
+  it("split rejects env/ratio/focus:false on core instead of dropping them", async () => {
+    const s = setup();
+    for (const extra of [{ env: ["A=1"] }, { ratio: 0.3 }, { focus: false }]) {
+      const { text } = await s.call("herdr_pane", { action: "split", paneId: PANE, splitDirection: "right", ...extra });
+      expect(text).toStartWith("[unsupported_on_core]");
+    }
+    expect(s.calls).toEqual([]);
+  });
+});
+
+describe("herdr_agent fixes from review", () => {
+  it("start with a space opens a tab there; paneId is refused on core", async () => {
+    const s = setup();
+    await s.call("herdr_agent", { action: "start", kind: "claude", workspaceId: SPACE, name: "x" });
+    expect(s.calls[0]).toBe(`app tab.new {"space":"${SPACE}","argv":["claude"],"name":"x"}`);
+    const { text } = await s.call("herdr_agent", { action: "start", kind: "claude", workspaceId: SPACE, paneId: PANE });
+    expect(text).toStartWith("[unsupported_on_core]");
+  });
+
+  it("start on herdr refuses Herdr app fields", async () => {
+    const { text } = await setup({ env: { HERDR_WORKSPACE_ID: "w1" } }).call("herdr_agent", { action: "start", kind: "claude", name: "x", paneId: "w1:p1", cwd: "/x" });
+    expect(text).toContain("Herdr app options");
+  });
+
+  it("a bare name found in core while herdr is down: get answers, send_keys is refused", async () => {
+    const s = setup({ herdr: { agentGet: async () => { throw new HerdrError("socket_unreachable", "no herdr"); } } });
+    expect((await s.call("herdr_agent", { action: "get", target: "review" })).body.agent.engine).toBe("core");
+    const { text } = await s.call("herdr_agent", { action: "send_keys", target: "review", keys: ["esc"] });
+    expect(text).toStartWith("[target_unresolved]");
+    expect(s.calls).toEqual([]);
+  });
+
+  it("read rejects herdr-only options on core; herdr rejects lines 0", async () => {
+    const s = setup();
+    expect((await s.call("herdr_agent", { action: "read", target: "t7", source: "visible" })).text).toStartWith("[unsupported_on_core]");
+    expect((await s.call("herdr_agent", { action: "read", target: "w1:p1", lines: 0 })).text).toContain("at least 1");
+  });
+
+  it("engines_unreachable labels each error by its own engine", async () => {
+    const { text } = await setup({
+      herdr: { agentList: async () => { await Bun.sleep(5); throw new HerdrError("socket_unreachable", "no herdr"); } },
+      core: { terminalList: async () => { throw new CoreError("core_unreachable", "no core"); } },
+    }).call("herdr_agent", { action: "list" });
+    expect(text).toContain("herdr: [socket_unreachable]");
+    expect(text).toContain("core: [core_unreachable]");
+  });
 });

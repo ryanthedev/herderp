@@ -1,8 +1,8 @@
 {
   "name": "herderp",
   "displayName": "herderp",
-  "version": "0.13.0",
-  "description": "MCP tools for the herdr CLI, plus session necromancy: find, read, and anchor-extract a previous Claude Code agent session from a herdr space.",
+  "version": "0.14.0",
+  "description": "MCP tools for herdr and the Herdr desktop app (herdr-core): agents, layout, watch, and moving sessions between them, plus session necromancy: find, read, and anchor-extract a previous Claude Code agent session from a herdr workspace or Herdr app space.",
   "author": {
     "name": "r"
   },

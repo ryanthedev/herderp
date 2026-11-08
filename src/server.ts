@@ -14,6 +14,9 @@ import { registerHostTools } from "./tools/hosts.js";
 import { createNecromancy } from "./necromancy/core.js";
 import { registerCuratedTools } from "./tools/curated.js";
 import { registerNecromancyTools } from "./tools/necromancy.js";
+import { createCoreClient, type CoreClient } from "./core/client.js";
+import { createSessionLookup } from "./core/sessions.js";
+import { createCoreView } from "./core/view.js";
 
 export const SERVER_NAME = "derp";
 export const SERVER_VERSION = "0.13.0";
@@ -33,16 +36,38 @@ function registerStubTool(server: McpServer): void {
   });
 }
 
+/**
+ * The space this server's agent runs in. The MCP server inherits its agent's
+ * environment, and neither id changes for a running terminal, so reading it
+ * here is safe: herdr's HERDR_WORKSPACE_ID, else the `herdr.space` label on
+ * the herdr-core terminal named by HC_TERMINAL_ID.
+ */
+export async function currentWorkspace(core: CoreClient, env: NodeJS.ProcessEnv): Promise<string | undefined> {
+  if (env.HERDR_WORKSPACE_ID) return env.HERDR_WORKSPACE_ID;
+  if (!env.HC_TERMINAL_ID) return undefined;
+  try {
+    return (await core.terminalGet(env.HC_TERMINAL_ID)).spaceId ?? undefined;
+  } catch {
+    return undefined; // the core is down: resolve as if no current space was given
+  }
+}
+
 async function main(): Promise<void> {
   const server = createServer();
   registerStubTool(server);
   const client = createHerdrClient();
   const hosts = createHostRegistry({ localClient: client });
-  registerCuratedTools(server, hosts);
+  // herdr-core runs the Herdr desktop app's terminals; herdr and it run side
+  // by side, and every tool below reaches both.
+  const core = createCoreClient();
+  const sessions = createSessionLookup();
+  registerCuratedTools(server, hosts, { core, sessions, env: process.env });
   registerHostTools(server, hosts);
   // Necromancy reads session files from THIS machine's disk, so it stays
-  // bound to the local client; remote hosts are a curated-tools concern.
-  registerNecromancyTools(server, createNecromancy({ client }));
+  // bound to the local engines; remote hosts are a curated-tools concern.
+  registerNecromancyTools(server, createNecromancy({ client, liveViews: [createCoreView(core, sessions)] }), {
+    currentWorkspace: () => currentWorkspace(core, process.env),
+  });
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

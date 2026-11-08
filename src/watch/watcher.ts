@@ -6,7 +6,7 @@
 //
 // What is worth a wake-up (everything else stays silent, because each event
 // becomes a notification in the watcher's conversation):
-//   - stopped: the agent reached done / idle / blocked (blocked = it needs
+//   - stopped: the agent reached done / idle / blocked / error (blocked = it needs
 //     input, usually a permission prompt or a question);
 //   - stalled: it should be working but nothing has happened for stallMs -
 //     no status change and no transcript write;
@@ -16,14 +16,18 @@
 
 import type { AgentStatus } from "../herdr/types.js";
 
-/** Statuses that mean the agent has stopped and is waiting on someone. */
-export const STOPPED_STATUSES: ReadonlySet<AgentStatus> = new Set(["done", "idle", "blocked"]);
+/** A watched agent's status: herdr's words, plus herdr-core's "error". */
+export type WatchStatus = AgentStatus | "error";
+
+/** Statuses that mean the agent has stopped and is waiting on someone.
+ * "error" (herdr-core only) is the agent saying it failed - worth a wake-up too. */
+export const STOPPED_STATUSES: ReadonlySet<WatchStatus> = new Set(["done", "idle", "blocked", "error"]);
 
 export interface WatchTarget {
   /** How the user named it (agent name or pane id) - the label on every line. */
   label: string;
   paneId: string;
-  status: AgentStatus;
+  status: WatchStatus;
   /** No transcript to watch (yet), so silence proves nothing: no stall
    * reports until the first activity() shows one exists. */
   noStall?: boolean;
@@ -37,13 +41,13 @@ export interface WatchOptions {
 }
 
 export type WatchEvent =
-  | { type: "status"; label: string; paneId: string; status: AgentStatus; previous: AgentStatus; inPreviousMs: number }
-  | { type: "stalled"; label: string; paneId: string; status: AgentStatus; quietMs: number }
+  | { type: "status"; label: string; paneId: string; status: WatchStatus; previous: WatchStatus; inPreviousMs: number }
+  | { type: "stalled"; label: string; paneId: string; status: WatchStatus; quietMs: number }
   | { type: "gone"; label: string; paneId: string; detail: string };
 
 interface PaneState {
   label: string;
-  status: AgentStatus;
+  status: WatchStatus;
   statusSince: number;
   lastActivity: number;
   stallReported: boolean;
@@ -82,7 +86,7 @@ export class Watcher {
   }
 
   /** herdr reported a status for a pane. Unknown panes are ignored. */
-  status(paneId: string, status: AgentStatus, now: number): WatchEvent[] {
+  status(paneId: string, status: WatchStatus, now: number): WatchEvent[] {
     const s = this.panes.get(paneId);
     if (!s || s.gone || s.status === status) return [];
     const previous = s.status;

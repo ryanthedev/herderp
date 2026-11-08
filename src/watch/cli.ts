@@ -4,13 +4,18 @@
 // behavior and exit codes.
 //
 // Usage: bun run cli.ts <target>... [--stall 10m] [--once] [--json] [--verbose] [--poll 15s]
+// A target is `core:<address>` (a Herdr app terminal), `herdr:<target>`, or a
+// bare herdr target.
 
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createHerdrClient } from "../herdr/client.js";
 import { defaultSocketPath } from "../herdr/events.js";
 import { createNecromancy, type Necromancy } from "../necromancy/core.js";
+import { createCoreClient } from "../core/client.js";
+import { createSessionLookup } from "../core/sessions.js";
 import { runWatch, type RunWatchOptions } from "./run.js";
+import { coreSource, herdrSource } from "./sources.js";
 import { parseDuration } from "./watcher.js";
 
 /**
@@ -56,8 +61,10 @@ if (import.meta.main) {
   const projectsRoot = join(homedir(), ".claude", "projects");
   const necromancy = createNecromancy({ client, projectsRoot });
   const code = await runWatch(parsed, {
-    client,
-    socketPath: defaultSocketPath(),
+    sources: {
+      herdr: herdrSource(client, defaultSocketPath()),
+      core: coreSource(createCoreClient(), createSessionLookup()),
+    },
     projectsRoot,
     pollMs: parsed.pollMs,
     // Write straight to the fd: Monitor needs each line the moment it happens.

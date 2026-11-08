@@ -15,7 +15,7 @@
 import type { HerdrClient } from "../herdr/client.js";
 import type { Agent, AgentStatus, Pane, Tab, Workspace } from "../herdr/types.js";
 import type { CoreClient } from "./client.js";
-import { isClaudeTerminal, type SessionLookup } from "./sessions.js";
+import { isAtShell, isClaudeTerminal, type SessionLookup } from "./sessions.js";
 import type { AppSpace, CoreTerminal } from "./types.js";
 
 /** The slice of HerdrClient necromancy reads live state through. */
@@ -91,7 +91,7 @@ export function createCoreView(core: CoreClient, sessions: SessionLookup): LiveV
               id: ref.pane,
               workspaceId: space.id,
               tabId: tab.id,
-              agent: terminal && isClaudeTerminal(terminal) ? "claude" : (terminal?.app ?? ""),
+              agent: terminal && isClaudeTerminal(terminal) ? "claude" : terminal && isAtShell(terminal) ? "" : (terminal?.app ?? ""),
               sessionId,
               cwd: terminal?.cwd ?? "",
               status: toAgentStatus(terminal),

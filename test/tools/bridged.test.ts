@@ -273,4 +273,11 @@ describe("herdr_agent fixes from review", () => {
     expect(body.agents.map((a: { engine: string }) => a.engine)).toEqual(["herdr"]);
     expect(body.degraded).toBeUndefined();
   });
+
+  it("a pane whose terminal is back at its shell lists as a shell", async () => {
+    const { body } = await setup({
+      core: { terminalList: async () => ({ terminals: [terminal({ foreground: { pid: 1, argv: ["/bin/zsh", "-li"], cwd: "/b" } })], machines: [] }) },
+    }).call("herdr_pane", { action: "list", workspaceId: SPACE });
+    expect(body.panes[0]).toMatchObject({ terminal: "t7", agent: "", status: null });
+  });
 });

@@ -73,12 +73,20 @@ describe("createSessionLookup", () => {
   it("isAtShell: an interactive shell is a prompt; a shell running a script is not", () => {
     const fg = (argv: string[]) => terminal({ foreground: { pid: 1, argv, cwd: "/" } });
     for (const argv of [["/bin/zsh", "-l"], ["-zsh"], ["bash"], ["/bin/zsh", "-li"]]) expect(isAtShell(fg(argv))).toBe(true);
-    for (const argv of [["sh", "/tmp/x.sh"], ["sh", "-c", "make"], ["claude"], ["node", "x"]]) expect(isAtShell(fg(argv))).toBe(false);
+    for (const argv of [["sh", "/tmp/x.sh"], ["sh", "-c", "make"], ["claude"], ["node", "x"], ["bash", "-s"], ["sh", "-"], ["zsh", "-lic", "claude"]]) {
+      expect(isAtShell(fg(argv))).toBe(false);
+    }
+    expect(isAtShell(fg(["bash", "--rcfile", "/x/rc"]))).toBe(true);
   });
 
   it("recognizes Claude by its program name", () => {
     expect(isClaudeTerminal(terminal())).toBe(true);
     expect(isClaudeTerminal(terminal({ app: "", foreground: { pid: 1, argv: ["/opt/bin/claude", "-c"], cwd: "/" } }))).toBe(true);
     expect(isClaudeTerminal(terminal({ app: "codex", foreground: { pid: 1, argv: ["codex"], cwd: "/" } }))).toBe(false);
+    const fg = (argv: string[]) => terminal({ app: "", foreground: { pid: 1, argv, cwd: "/" } });
+    expect(isClaudeTerminal(fg(["bun", "x", "claude"]))).toBe(true);
+    expect(isClaudeTerminal(fg(["node", "/opt/lib/claude"]))).toBe(true);
+    expect(isClaudeTerminal(fg(["vim", "claude"]))).toBe(false);
+    expect(isClaudeTerminal(fg(["ls", "claude"]))).toBe(false);
   });
 });

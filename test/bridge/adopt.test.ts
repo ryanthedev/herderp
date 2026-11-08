@@ -204,4 +204,20 @@ describe("adoptAgent", () => {
     expect((await adoptAgent({ target: "w3:p1" }, deps).catch((e) => e)).code).toBe("adopt_failed");
     expect(log.at(-1)).toBe('app terminal.kill {"terminal":"t4c"}');
   });
+
+  it("the window call fails (a timeout): a copy it started anyway is found and closed", async () => {
+    const { deps, log } = setup();
+    const core = deps.core as unknown as Record<string, unknown>;
+    core.appDo = async (command: string, args: Record<string, unknown>) => {
+      log.push(`app ${command} ${JSON.stringify(args)}`);
+      if (command !== "terminal.kill") throw new CoreError("timeout", "herdr-app do did not answer within 15s");
+      return { ok: true };
+    };
+    core.terminalList = async () => ({ terminals: [coreTerminal({ address: "t4x", foreground: { pid: 9, argv: ["claude", "--resume", SESSION], cwd: "/repo" } })], machines: [] });
+    const error = await adoptAgent({ target: "w3:p1" }, deps).catch((e) => e);
+    expect(error.code).toBe("adopt_failed");
+    expect(error.message).toContain("t4x was closed");
+    expect(log.at(-1)).toBe('app terminal.kill {"terminal":"t4x"}');
+    expect(log.some((l) => l.startsWith("herdr.paneClose"))).toBe(false);
+  });
 });

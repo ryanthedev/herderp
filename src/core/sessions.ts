@@ -33,9 +33,15 @@ export type SessionLookup = (terminal: CoreTerminal) => Promise<string | null>;
 export function isClaudeTerminal(terminal: CoreTerminal): boolean {
   const argv = terminal.foreground?.argv;
   if (!argv || argv.length === 0) return false;
-  // `claude ...`, or a script runner launching it (`node /path/claude`, `bun x claude`).
-  return argv.slice(0, 2).some((arg) => basename(arg) === "claude");
+  if (basename(argv[0]!) === "claude") return true;
+  // A script runner launching it: `node /path/claude`, `bun x claude`, `npx claude`.
+  if (!RUNNERS.has(basename(argv[0]!))) return false;
+  const rest = argv.slice(1).filter((arg) => !arg.startsWith("-"));
+  const script = rest[0] === "x" || rest[0] === "exec" ? rest[1] : rest[0];
+  return script !== undefined && basename(script) === "claude";
 }
+
+const RUNNERS: ReadonlySet<string> = new Set(["node", "bun", "bunx", "deno", "npx", "pnpm", "yarn"]);
 
 const SHELLS: ReadonlySet<string> = new Set(["sh", "bash", "zsh", "fish", "dash", "ksh", "nu", "tcsh", "csh", "pwsh"]);
 
@@ -47,7 +53,18 @@ const SHELLS: ReadonlySet<string> = new Set(["sh", "bash", "zsh", "fish", "dash"
 export function isAtShell(terminal: Pick<CoreTerminal, "foreground">): boolean {
   const argv = terminal.foreground?.argv;
   if (!argv || argv.length === 0 || !SHELLS.has(basename(argv[0]!).replace(/^-/, ""))) return false;
-  return argv.slice(1).every((arg) => arg.startsWith("-") && arg !== "-c");
+  // Flags only - no script, no `-c` command, no `-s`/`-`/`--` reading a script from stdin.
+  // `--rcfile`/`--init-file` take a value, which is not a script.
+  for (let i = 1; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (arg === "--rcfile" || arg === "--init-file") {
+      i++;
+      continue;
+    }
+    if (!arg.startsWith("-") || arg === "-" || arg === "--" || arg === "-c" || arg === "-s") return false;
+    if (/^-[a-z]*[cs][a-z]*$/.test(arg) && !arg.startsWith("--")) return false; // bundled: -ic, -ls
+  }
+  return true;
 }
 
 export function createSessionLookup(sessionsDir = join(homedir(), ".claude", "sessions")): SessionLookup {

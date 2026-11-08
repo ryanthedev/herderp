@@ -19,6 +19,7 @@ import { CoreError } from "../core/types.js";
 import type { ClientResolver } from "../herdr/hosts.js";
 import { HerdrError } from "../herdr/types.js";
 import { engineOfId, qualifyCore, type Engine } from "./route.js";
+import { isNotInstalled } from "./absent.js";
 
 /** Codes that mean "asked, and it isn't there" - anything else means "couldn't ask". */
 const NOT_FOUND_CODES: ReadonlySet<string> = new Set(["not_found", "agent_not_found", "pane_not_found", "unknown_host", "machine_unknown"]);
@@ -47,7 +48,8 @@ async function probe(run: () => Promise<{ live: boolean }>): Promise<Probe> {
     return { found: true, live };
   } catch (error) {
     if (error instanceof HerdrError || error instanceof CoreError) {
-      return { found: false, missing: NOT_FOUND_CODES.has(error.code), detail: `[${error.code}] ${error.message}` };
+      // Not installed here is as good as "asked, not there": that engine can't hold it.
+      return { found: false, missing: NOT_FOUND_CODES.has(error.code) || isNotInstalled(error), detail: `[${error.code}] ${error.message}` };
     }
     throw error; // a programming fault stays loud
   }

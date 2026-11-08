@@ -178,8 +178,12 @@ export async function coreTab(core: CoreClient, tabId: string): Promise<CoreTabR
 }
 
 export async function corePanes(core: CoreClient, workspaceId?: string): Promise<CorePaneRow[]> {
-  const spaces = await core.appSpaces();
-  return (workspaceId ? [findSpace(spaces, workspaceId)] : spaces).flatMap(paneRows);
+  const [spaces, listing] = await Promise.all([core.appSpaces(), core.terminalList().catch(() => null)]);
+  const rows = (workspaceId ? [findSpace(spaces, workspaceId)] : spaces).flatMap(paneRows);
+  if (listing === null) return rows;
+  // The window keeps a terminal's last reported app after it exits; a pane back at its shell is a shell.
+  const atShell = new Set(listing.terminals.filter(isAtShell).map((t) => t.address));
+  return rows.map((row) => (atShell.has(row.machine ? `${row.machine}/${row.terminal.replace(/^.*\//, "")}` : row.terminal) ? { ...row, agent: "", status: null } : row));
 }
 
 export async function corePane(core: CoreClient, paneId: string): Promise<CorePaneRow> {

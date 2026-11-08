@@ -76,6 +76,17 @@ function errorText(error: unknown): string {
   return String(error);
 }
 
+/** A live terminal running `claude --resume <sessionId>`, if any. */
+async function findResuming(core: CoreClient, sessionId: string): Promise<string | null> {
+  try {
+    const { terminals } = await core.terminalList();
+    const hit = terminals.find((t) => t.state === "live" && (t.foreground?.argv.includes(sessionId) ?? false));
+    return hit?.address ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** The terminal a new tab holds, when a reply named the tab but not the terminal. */
 async function findTerminal(core: CoreClient, reply: Record<string, unknown>): Promise<string | null> {
   const tabId = replyId(reply, "tab");
@@ -120,9 +131,29 @@ export async function adoptAgent(options: AdoptOptions, deps: AdoptDeps): Promis
 
   // 2. The destination: a new tab in a given space, or a new space.
   const argv = ["claude", "--resume", agent.sessionId];
-  const reply = options.workspaceId
-    ? await core.appDo("tab.new", { space: options.workspaceId, folder: agent.cwd, argv, ...(label ? { name: label } : {}) })
-    : await core.appDo("space.new", { folder: agent.cwd, argv, machine: "", ...(label ? { name: label } : {}) });
+  let reply: Record<string, unknown>;
+  try {
+    reply = options.workspaceId
+      ? await core.appDo("tab.new", { space: options.workspaceId, folder: agent.cwd, argv, ...(label ? { name: label } : {}) })
+      : await core.appDo("space.new", { folder: agent.cwd, argv, machine: "", ...(label ? { name: label } : {}) });
+  } catch (error) {
+    // The window may have started it anyway (a timeout kills only the CLI):
+    // find any terminal resuming this session and close it.
+    const stray = await findResuming(core, agent.sessionId);
+    let outcome = `nothing resuming the session was found yet, but the window may still start one - if \`claude --resume ${agent.sessionId}\` may be running in the Herdr app, close one copy`;
+    if (stray !== null) {
+      try {
+        await core.appDo("terminal.kill", { terminal: stray });
+        outcome = `the resumed copy in ${stray} was closed`;
+      } catch (killError) {
+        outcome = `a resumed copy is running in ${stray} and could NOT be closed (${errorText(killError)}) - close it by hand`;
+      }
+    }
+    throw new BridgeError(
+      "adopt_failed",
+      `the Herdr app did not confirm the new ${options.workspaceId ? "tab" : "space"} (${errorText(error)}); ${outcome}; the herdr pane ${agent.paneId} was left as it was`,
+    );
+  }
   const terminal = replyId(reply, "terminal") ?? (await findTerminal(core, reply));
   if (terminal === null) {
     const where = [replyId(reply, "space") && `space ${replyId(reply, "space")}`, replyId(reply, "tab") && `tab ${replyId(reply, "tab")}`]

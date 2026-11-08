@@ -122,7 +122,6 @@ const ENGINE = z.enum(["herdr", "core"]);
 
 /** herdr_agent's actions that exist only with herdr-core in play. */
 const BRIDGE_AGENT_DOC =
-  "- interrupt: stop the agent's current turn, not the process (target). Core reports what happened; herdr presses esc.\n" +
   "- adopt: move a Claude session from a herdr pane into the Herdr app (target = the herdr agent; optional workspaceId = a Herdr app space id to add it as a tab, else a new space named label or after the herdr workspace). It resumes the session there (claude --resume) and closes the old pane once the new one is up. Refuses unless the agent is idle or done; if the new one doesn't come up, or the old one changes meanwhile, the old pane stays and the new one is closed.\n" +
   "On core (Herdr app): read takes lines (0 = screen only, fast; no source/format/ansi); prompt/wait wait until the agent stops working (no until); start opens a terminal (kind + optional argv/cwd/place/name, or workspaceId for a new tab there; no paneId/timeoutMs); rename and explain are herdr only.\n";
 
@@ -192,6 +191,7 @@ export function registerCuratedTools(server: McpServer, clients: ClientResolver,
       "- start: run an agent binary in an EXISTING pane (name, kind, paneId; optional timeoutMs, argv). herdr does not make the pane - create one with herdr_pane{action:'split'} or herdr_workspace{action:'create'} first, and it must be at a shell prompt.\n" +
       "- wait: block until the agent reaches a state (target; optional until, timeoutMs). until takes one state or several and matches the first to arrive; omit it for any settled state (idle/done/blocked). 'done' IS accepted, and is usually what you want after prompting.\n" +
       "- explain: herdr's own diagnosis of how it detected this agent's state (target) - reach for it when a reported status looks wrong. herdr only.\n" +
+      "- interrupt: stop the agent's current turn, not the process (target). Core reports what happened; herdr presses esc.\n" +
       (bridge ? BRIDGE_AGENT_DOC : "") +
       "- watch: get notified while you keep working - when agents stop (done/idle/blocked, with their last message), stall, or go away (target, or targets for several; optional stallMs, once, json, verbose). Returns a command to pass to the Monitor tool, which turns each line it prints into a notification. This machine only - not with host.\n" +
       "`target` accepts a terminal id, a unique agent name, a detected agent label, or a legacy pane id.",

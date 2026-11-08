@@ -75,7 +75,7 @@ async function both<H, C>(
     const of = (engine: Engine) => degraded.find((d) => d.engine === engine)!;
     throw new CoreError(
       "engines_unreachable",
-      `neither engine answered - herdr: [${of("herdr").code}] ${of("herdr").message}; core: [${of("core").code}] ${of("core").message}`,
+      `no engine answered (not installed counts) - herdr: [${of("herdr").code}] ${of("herdr").message}; core: [${of("core").code}] ${of("core").message}`,
     );
   }
   return { rows: [...h, ...c], degraded: degraded.filter((d) => !d.absent).map(({ absent: _, ...d }) => d) };

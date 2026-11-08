@@ -140,4 +140,12 @@ describe("resolveAgentTarget", () => {
     };
     expect(await resolveAgentTarget("x", {}, deps(boom, found)).catch((e) => e)).toBeInstanceOf(TypeError);
   });
+
+  it("an engine that isn't installed is skipped: changes go ahead, misses are not_found", async () => {
+    const absent = async () => {
+      throw new CoreError("not_installed", "no hc");
+    };
+    expect(await resolveAgentTarget("lead", { mutating: true }, deps(absent, found))).toEqual({ engine: "herdr", target: "lead" });
+    expect((await resolveAgentTarget("x", {}, deps(absent, herdrMissing)).catch((e) => e)).code).toBe("target_not_found");
+  });
 });

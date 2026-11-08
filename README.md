@@ -1,11 +1,11 @@
 # herderp
 
-A Claude Code plugin: a stdio **MCP server** wrapping the [`herdr`](https://github.com/ryanthedev/herderp) CLI with curated one-shot tools, plus **session necromancy** — find and read a previous Claude Code agent session from a herdr "space."
+A Claude Code plugin: a stdio **MCP server** over both herdr engines — the [`herdr`](https://github.com/ryanthedev/herderp) TUI server and **herdr-core** (`hc`), which runs the **Herdr desktop app**'s terminals — with curated one-shot tools, plus **session necromancy**: find and read a previous Claude Code agent session from a herdr workspace or Herdr app space.
 
 ## What it does
 
 - **Curated herdr tools** — MCP calls over the `herdr` CLI instead of hand-typing it. One tool per *resource*, each taking an `action`, so ~35 CLI subcommands cost six tools rather than thirty-five:
-  - `herdr_agent` — `list`/`get`/`read`/`send`/`focus`/`rename`/`start`/`wait`/`explain`.
+  - `herdr_agent` — `list`/`get`/`read`/`prompt`/`send_keys`/`focus`/`rename`/`start`/`wait`/`explain`/`interrupt`/`watch` (see [Watching agents](#watching-agents)), and `adopt` (see [Moving a session into the Herdr app](#moving-a-session-into-the-herdr-app)).
   - `herdr_pane` — `list`/`get`/`run`/`close`/`rename`/`focus`/`split`/`swap`/`move`.
   - `herdr_tab` and `herdr_workspace` — `list`/`get`/`create`/`rename`/`focus`/`close`.
   - `herdr_worktree` — `list`/`create`/`open`/`remove`.
@@ -24,9 +24,79 @@ A Claude Code plugin: a stdio **MCP server** wrapping the [`herdr`](https://gith
 - **`necromancy` skill** — picks the entry point (digest, cross-session search, handle, or a named space), reads only what matters, and stays honest about every cap.
 - **`/herderp:ghost` command** — a one-shot catch-up: the previous session by default, or point it at a space, a handle, or a session id. Get a plain summary of what it did and where it stopped, with turn citations and questions to resume. Reading only — it never revives.
 
+## Two engines: herdr and the Herdr app
+
+The Herdr desktop app doesn't run its terminals on the `herdr` server. They live in **herdr-core** (`hc`), and the window's spaces, tabs and panes are driven by `herdr-app`. Both engines can run at once, so herderp drives both through the same tools:
+
+| | herdr (TUI) | Herdr app (herdr-core) |
+|---|---|---|
+| Talks to | `herdr` CLI | `hc connect` (JSON-RPC), `herdr-app ls` / `herdr-app do` |
+| Containers | workspace > tab > pane | space > tab > pane |
+| Ids | `w8`, `w8:tD`, `w8:pG`, `term_…` | terminal `t3s` / `ska/t3s`, space `sp…`, tab `tb…`, pane `p…` |
+| Agent status | herdr's detector | the agent's own report: `idle`, `working`, `blocked`, `done`, `error` |
+| Remote machines | `host` from herderp's `hosts.json` | `host` = an `hc machine ls` name (`ska/t7`) |
+
+- **Which engine answers:**
+  - **Lists** cover both. Every row carries `engine`. If one engine is down, you get the other's rows plus a `degraded` entry naming it.
+  - **An id's shape** picks its engine.
+  - **A bare name** like `review` is looked up in both. If both engines have it, the call fails with `[ambiguous_target]` rather than guessing.
+  - **Calls that create something** (a space, a tab, an agent) go to the engine the caller runs in: `HC_TERMINAL_ID` means core, `HERDR_WORKSPACE_ID` means herdr.
+  - **`engine:"herdr"|"core"`** forces one.
+- **What differs on core:**
+  - **`read`** takes `lines`: 0, the default, reads the visible screen, which is fast.
+  - **`prompt` and `wait`** wait until the agent stops working, so `until` is rejected.
+  - **`start`** opens a new terminal in the window (`kind`, plus optional `argv`, `cwd`, `place`, `name`).
+  - **`herdr_pane` `focus`** works by pane id, and `run` types into the pane's terminal.
+- **herdr only:** `rename` and `explain` (agent), `move` and pair `swap` (pane), and worktrees. On core these fail with `[unsupported_on_core]` and say what to use instead.
+- **Necromancy** marks sessions live in either engine and resolves handles such as `upublish:1` against herdr workspaces and Herdr app spaces alike.
+  - **Same name in both engines** (the normal state while moving over): if only one engine's tab holds a live Claude, the handle resolves there. Otherwise the result is `ambiguous_workspace`, with each candidate tagged `engine`.
+  - **The current space** defaults to `HERDR_WORKSPACE_ID`, else the Herdr app space of `HC_TERMINAL_ID`.
+- **How a core terminal's Claude session is found:** the terminal's foreground pid leads to `~/.claude/sessions/<pid>.json`. This needs Claude Code in the foreground on this machine, so terminals on remote core machines report `sessionId: null`.
+
+## Moving a session into the Herdr app
+
+`herdr_agent{action:"adopt", target:"w8:pG"}` moves a Claude Code session out of a herdr pane:
+
+1. **Check it's at rest.** It refuses unless the herdr agent is `idle` or `done`. Two live Claude processes must never share one session, and `unknown` might be mid-turn.
+2. **Resume it in the Herdr app.** It runs `claude --resume <session>` in the same folder, as a tab in `workspaceId` (a Herdr app space id) or in a new space named `label` (default: the herdr workspace's label). It starts through your login shell, so your usual `claude` alias or flags apply.
+3. **Wait for it.** The new terminal has to report a status and show a Claude session.
+4. **Close the old pane.** This happens only now, and only if the old agent is still at rest.
+
+If the new terminal doesn't come up, or the old agent starts working meanwhile, adopt closes the **new** terminal and leaves the herdr pane exactly as it was. Adopt works on this machine only, because Claude's session files live here.
+
+## Watching agents
+
+`herdr_agent{action:"watch"}` lets one agent keep working while it watches others, and get woken when they need it. MCP tools can't push messages into a conversation, so the action returns a **command for Claude Code's Monitor tool**, which turns each line the command prints into a notification:
+
+```
+herdr_agent{action:"watch", targets:["cap-api","cap-ui"], stallMs:600000}
+→ { command: "'bun' 'run' '…/src/watch/cli.ts' 'cap-api' 'cap-ui' '--stall' '600000'",
+    description: "herdr agents: cap-api, cap-ui", timeout_ms: 1800000, targets: [...], hint: "…" }
+
+Monitor({ command, description, timeout_ms })
+```
+
+The targets are resolved when you call the action, so a typo fails there, not after arming. Once armed, the watcher prints one line per event worth acting on:
+
+| Line | When |
+|---|---|
+| `[cap-api] watching - currently working (session 1a2b3c4d)` | Once per target at start. A target that has already stopped shows its status here. |
+| `[cap-api] done after 12m working - last: "…" (session 1a2b3c4d)` | The agent finished its turn. `idle` reads the same way. The last line of its own reply is quoted from its transcript. |
+| `[cap-ui] blocked after 40s working - needs input (a permission prompt or a question)` | The agent is waiting on someone. |
+| `[t7] error after 3m working` | A Herdr app agent reported an error. |
+| `[cap-ui] stalled - no activity for 10m while working` | With `stallMs`: nothing has been written to its transcript and its status hasn't changed for that long. Set `stallMs` longer than your slowest expected command. |
+| `[cap-db] gone - agent exited` | The pane closed or the agent quit. |
+| `[watch] lost herdr's event stream - …` | herdr went away. The watch exits with status 1; re-arm it once herdr is back. |
+
+- **Options:** `once:true` exits after the first event (use it for "tell me when this one finishes"). `verbose:true` also reports agents starting to work again. `json:true` prints every line, including the start and failure lines, as one JSON object with a `type` field.
+- **Expiry:** Monitor ends a watch after 30 minutes at most. Re-arm it with the same command to keep watching.
+- **Both engines:** one watch can mix herdr agents and Herdr app terminals. herdr agents come through herdr's socket. Herdr app terminals come through herdr-core's event stream (`events.subscribe` over `hc connect`) and are watched by address, so the line shows `t7`. Losing either stream ends the watch, and the last line names which one was lost.
+- **Sub-agents:** hc already notifies a parent agent when its own children (the terminals it started) finish, block or exit. Watch is for every other agent.
+- **Scope:** the watch runs on this machine. It doesn't take `host` yet.
+
 ## Remote hosts
 
-Every `herdr_*` tool takes an optional `host`. Omit it for this machine's herdr server; name a registered host to drive the herdr server on another machine instead — `herdr_agent{action:"prompt", target:"w6:p2E", text:"...", host:"ska"}` asks an agent on `ska`. The necromancy tools read this machine's session files and take no host.
+Every `herdr_*` tool takes an optional `host`. For a **Herdr app** call it is the name of a machine herdr-core already knows (`hc machine ls`): a core target becomes `<host>/<address>`, a list keeps that machine's rows, and a new space is made there. The rest of this section is about **herdr**: omit `host` for this machine's herdr server, or name a registered host to drive the herdr server on another machine instead — `herdr_agent{action:"prompt", target:"w6:p2E", text:"...", host:"ska"}` asks an agent on `ska`. The necromancy tools read this machine's session files and take no host.
 
 Hosts live in `~/.config/herderp/hosts.json` (override with `HERDERP_HOSTS_PATH`), which `herdr_host{action:"add"}` writes for you and which is re-read on every call, so edits need no restart:
 
@@ -57,7 +127,7 @@ Claude sessions persist on disk at `~/.claude/projects/<cwd-slug>/<uuid>.jsonl` 
 ## Requirements
 
 - [`bun`](https://bun.sh) on `PATH` (the server runs under bun; dependencies auto-install on first launch — no `bun install` needed).
-- A running `herdr` server and the Claude Code session store at `~/.claude/projects`. Both degrade gracefully with a clear message if absent.
+- A running `herdr` server and/or the Herdr app's herdr-core (`hc` and `herdr-app` on `PATH`), plus the Claude Code session store at `~/.claude/projects`. Each degrades gracefully with a clear message if absent.
 - For remote hosts: `ssh` on `PATH` and non-interactive access to each host (keys or Tailscale SSH).
 
 ## Install

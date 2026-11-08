@@ -347,7 +347,7 @@ function unwrapResult(parsed: unknown, key: string, argv: string[]): unknown {
 
 const KNOWN_STATUSES: ReadonlySet<string> = new Set(["idle", "working", "blocked", "done", "unknown"]);
 
-function toAgentStatus(raw: unknown): AgentStatus {
+export function toAgentStatus(raw: unknown): AgentStatus {
   return typeof raw === "string" && KNOWN_STATUSES.has(raw) ? (raw as AgentStatus) : "unknown";
 }
 

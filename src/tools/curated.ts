@@ -31,8 +31,14 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerTool } from "../registry.js";
 import type { ToolArgs, ToolInputShape, ToolResult } from "../registry.js";
 import type { HerdrClient } from "../herdr/client.js";
-import type { ClientResolver } from "../herdr/hosts.js";
+import { LOCAL_HOST, type ClientResolver } from "../herdr/hosts.js";
+import { planWatch } from "../watch/command.js";
 import type { AgentKind, AgentReadSource } from "../herdr/types.js";
+import type { CoreClient } from "../core/client.js";
+import type { SessionLookup } from "../core/sessions.js";
+import type { Engine } from "../bridge/route.js";
+import { agentRoute, coreAgentTool, corePaneTool, coreTabTool, coreWorkspaceTool, layoutRoute, type CoreHandler, type Route } from "./bridged.js";
+import type { AdoptDeps } from "../bridge/adopt.js";
 
 /** `--until` on both `agent wait` and `agent prompt`. Verbatim from herdr
  * 0.7.5's help: `[possible values: idle, working, blocked, done, unknown]`.
@@ -100,26 +106,74 @@ const HOST_DOC =
  * HerdrClient through `clients` from the optional `host` argument, so one
  * registration serves the local server and every registered remote alike.
  */
-export function registerCuratedTools(server: McpServer, clients: ClientResolver): void {
+/**
+ * What herderp needs to drive the Herdr desktop app's engine (herdr-core)
+ * beside herdr. Without it the tools are herdr-only, exactly as before.
+ */
+export interface BridgeDeps {
+  core: CoreClient;
+  sessions: SessionLookup;
+  /** The caller's environment, for its home engine (route.ts). */
+  env?: NodeJS.ProcessEnv;
+  adopt?: Omit<AdoptDeps, "core" | "sessions" | "herdr">;
+}
+
+const ENGINE = z.enum(["herdr", "core"]);
+
+/** herdr_agent's actions that exist only with herdr-core in play. */
+const BRIDGE_AGENT_DOC =
+  "- adopt: move a Claude session from a herdr pane into the Herdr app (target = the herdr agent; optional workspaceId = a Herdr app space id to add it as a tab, else a new space named label or after the herdr workspace). It resumes the session there (claude --resume) and closes the old pane once the new one is up. Refuses unless the agent is idle or done; if the new one doesn't come up, or the old one changes meanwhile, the old pane stays and the new one is closed.\n" +
+  "On core (Herdr app): read takes lines (0 = screen only, fast; no source/format/ansi); prompt/wait wait until the agent stops working (no until); start opens a terminal (kind + optional argv/cwd/place/name, or workspaceId for a new tab there; no paneId/timeoutMs); rename and explain are herdr only.\n";
+
+const ENGINE_DOC =
+  "\nTwo engines: the herdr TUI server ('herdr') and herdr-core, which runs the Herdr desktop app's terminals ('core'). " +
+  "Lists cover both, each row tagged `engine`; one engine being down leaves the other's rows plus `degraded`. " +
+  "Layout ids pick their engine by shape (core: sp…/tb…/p…, optionally machine/-prefixed; herdr: w8, w8:tD, w8:pG). An agent target " +
+  "like w8:pG or term_… is herdr; anything else (a name, t3s, ska/t3s) is looked up in both - found in both is refused as ambiguous, " +
+  "and if one engine can't be asked, only get/read/wait act on the other's match. Calls that create something go to the engine you run in " +
+  "(a remote host means herdr). Optional `engine` forces one.";
+
+/**
+ * Registers the curated herdr tools on `server`. Each call resolves its
+ * HerdrClient through `clients` from the optional `host` argument, so one
+ * registration serves the local server and every registered remote alike.
+ * With `bridge`, the agent/pane/tab/workspace tools also drive herdr-core.
+ */
+export function registerCuratedTools(server: McpServer, clients: ClientResolver, bridge?: BridgeDeps): void {
   const hostSchema = { host: z.string().optional() };
-  /** Wraps a per-resource definition: resolves the client for `args.host`
-   * and stamps the host onto object results so a remote answer is never
-   * mistaken for a local one. */
+  const engineSchema = bridge ? { engine: ENGINE.optional() } : {};
+  /** Wraps a per-resource definition: picks the engine, resolves the herdr
+   * client for `args.host` only when herdr is asked, and stamps the host onto
+   * object results so a remote answer is never mistaken for a local one. */
   function registerHosted<Shape extends ToolInputShape>(definition: {
     name: string;
     description: string;
     inputSchema: Shape;
     handler: (client: HerdrClient, args: ToolArgs<Shape & typeof hostSchema>) => Promise<ToolResult>;
+    /** Where a call goes; omitted (or no bridge): herdr. */
+    route?: (args: ToolArgs<Shape & typeof hostSchema> & { engine?: Engine }, env?: NodeJS.ProcessEnv) => Route;
+    /** The non-herdr routes (bridged.ts). Typed loosely here: each takes its own args shape. */
+    core?: CoreHandler;
   }): void {
+    const bridged = bridge !== undefined && definition.core !== undefined && definition.route !== undefined;
     registerTool(server, {
       name: definition.name,
-      description: definition.description + HOST_DOC,
-      inputSchema: { ...definition.inputSchema, ...hostSchema },
+      description: definition.description + HOST_DOC + (bridged ? ENGINE_DOC : ""),
+      inputSchema: { ...definition.inputSchema, ...hostSchema, ...(bridged ? engineSchema : {}) },
       handler: async (args) => {
-        const client = await clients.clientFor(args.host);
-        const result = await definition.handler(client, args);
-        if (typeof result === "string" || args.host === undefined) return result;
-        return { host: args.host, ...result };
+        const typed = args as ToolArgs<Shape & typeof hostSchema> & { engine?: Engine };
+        const route = bridged ? definition.route!(typed, bridge!.env) : "herdr";
+        const result =
+          route === "herdr"
+            ? await definition.handler(await clients.clientFor(args.host), args)
+            : await definition.core!(route, typed as never, (async () => {
+                const client = await clients.clientFor(args.host);
+                return { client, run: (a: typeof args) => definition.handler(client, a) };
+              }) as never);
+        // With both engines in play, every object answer says which one gave it.
+        const stamped = bridged && typeof result !== "string" && route === "herdr" && !("engine" in result) ? { engine: "herdr", ...result } : result;
+        if (typeof stamped === "string" || args.host === undefined) return stamped;
+        return { host: args.host, ...stamped };
       },
     });
   }
@@ -136,17 +190,27 @@ export function registerCuratedTools(server: McpServer, clients: ClientResolver)
       "- rename: give an agent a stable name, or clear:true to drop a custom one (target, then name or clear).\n" +
       "- start: run an agent binary in an EXISTING pane (name, kind, paneId; optional timeoutMs, argv). herdr does not make the pane - create one with herdr_pane{action:'split'} or herdr_workspace{action:'create'} first, and it must be at a shell prompt.\n" +
       "- wait: block until the agent reaches a state (target; optional until, timeoutMs). until takes one state or several and matches the first to arrive; omit it for any settled state (idle/done/blocked). 'done' IS accepted, and is usually what you want after prompting.\n" +
-      "- explain: herdr's own diagnosis of how it detected this agent's state (target) - reach for it when a reported status looks wrong.\n" +
+      "- explain: herdr's own diagnosis of how it detected this agent's state (target) - reach for it when a reported status looks wrong. herdr only.\n" +
+      "- interrupt: stop the agent's current turn, not the process (target). Core reports what happened; herdr presses esc.\n" +
+      (bridge ? BRIDGE_AGENT_DOC : "") +
+      "- watch: get notified while you keep working - when agents stop (done/idle/blocked, with their last message), stall, or go away (target, or targets for several; optional stallMs, once, json, verbose). Returns a command to pass to the Monitor tool, which turns each line it prints into a notification. This machine only - not with host.\n" +
       "`target` accepts a terminal id, a unique agent name, a detected agent label, or a legacy pane id.",
     inputSchema: {
-      action: z.enum(["list", "get", "read", "prompt", "send_keys", "focus", "rename", "start", "wait", "explain"]),
+      action: z.enum([
+        "list", "get", "read", "prompt", "send_keys", "focus", "rename", "start", "wait", "explain", "interrupt", "watch", "adopt",
+      ]),
       target: z.string().optional(),
+      targets: z.array(z.string()).optional(),
+      stallMs: z.number().int().positive().optional(),
+      once: z.boolean().optional(),
+      json: z.boolean().optional(),
+      verbose: z.boolean().optional(),
       text: z.string().optional(),
       keys: z.array(z.string()).optional(),
       name: z.string().optional(),
       clear: z.boolean().optional(),
       source: AGENT_READ_SOURCE.optional(),
-      lines: z.number().int().positive().optional(),
+      lines: z.number().int().nonnegative().optional(),
       format: AGENT_READ_FORMAT.optional(),
       ansi: z.boolean().optional(),
       wait: z.boolean().optional(),
@@ -155,7 +219,13 @@ export function registerCuratedTools(server: McpServer, clients: ClientResolver)
       kind: AGENT_KIND.optional(),
       paneId: z.string().optional(),
       argv: z.array(z.string()).optional(),
+      cwd: z.string().optional(),
+      place: z.enum(["tab", "right", "down"]).optional(),
+      workspaceId: z.string().optional(),
+      label: z.string().optional(),
     },
+    route: (args, env) => agentRoute(args, env),
+    core: bridge ? coreAgentTool(bridge) : undefined,
     handler: async (client, args) => {
       const tool = "herdr_agent";
       switch (args.action) {
@@ -167,6 +237,7 @@ export function registerCuratedTools(server: McpServer, clients: ClientResolver)
         case "get":
           return { agent: await client.agentGet(need(args.target, "target", tool, "get")) };
         case "read":
+          if (args.lines === 0) throw new Error(`${tool}{action:"read"} on herdr needs lines of at least 1 (0 = screen only is a Herdr app option)`);
           return {
             text: await client.agentRead(need(args.target, "target", tool, "read"), {
               source: args.source,
@@ -208,6 +279,9 @@ export function registerCuratedTools(server: McpServer, clients: ClientResolver)
           );
         }
         case "start": {
+          if (args.cwd !== undefined || args.place !== undefined || args.workspaceId !== undefined) {
+            throw new Error(`${tool}{action:"start"} on herdr runs in an existing pane (paneId) - cwd, place and workspaceId are Herdr app options`);
+          }
           const name = need(args.name, "name", tool, "start");
           await client.agentStart({
             name,
@@ -230,6 +304,22 @@ export function registerCuratedTools(server: McpServer, clients: ClientResolver)
           };
         case "explain":
           return { explain: await client.agentExplain(need(args.target, "target", tool, "explain")) };
+        case "interrupt":
+          // herdr has no stop command; esc is the stop key for every agent it detects.
+          await client.agentSendKeys(need(args.target, "target", tool, "interrupt"), ["esc"]);
+          return ok("pressed esc; herdr_agent{action:'get'} to see whether it stopped");
+        case "adopt":
+          throw new Error(`${tool}{action:"adopt"} needs the Herdr app (herdr-core) - it is not available in this server`);
+        case "watch": {
+          // The watcher subscribes to THIS machine's herdr socket; a remote
+          // watch would have to run on that machine, which is a later step.
+          if (args.host !== undefined && args.host !== "" && args.host !== LOCAL_HOST) {
+            throw new Error(`${tool}{action:"watch"} runs on this machine only - drop host (remote watch is not supported yet)`);
+          }
+          const targets = [...(args.targets ?? []), ...(args.target ? [args.target] : [])];
+          if (targets.length === 0) throw new Error(`${tool}{action:"watch"} requires "target" or "targets"`);
+          return { ...(await planWatch(client, { targets, stallMs: args.stallMs, once: args.once, json: args.json, verbose: args.verbose })) };
+        }
       }
     },
   });
@@ -265,6 +355,8 @@ export function registerCuratedTools(server: McpServer, clients: ClientResolver)
       label: z.string().optional(),
       tabLabel: z.string().optional(),
     },
+    route: (args, env) => layoutRoute(args, env),
+    core: bridge ? corePaneTool(bridge) : undefined,
     handler: async (client, args) => {
       const tool = "herdr_pane";
       switch (args.action) {
@@ -342,6 +434,8 @@ export function registerCuratedTools(server: McpServer, clients: ClientResolver)
       label: z.string().optional(),
       focus: z.boolean().optional(),
     },
+    route: (args, env) => layoutRoute(args, env),
+    core: bridge ? coreTabTool(bridge) : undefined,
     handler: async (client, args) => {
       const tool = "herdr_tab";
       switch (args.action) {
@@ -392,6 +486,8 @@ export function registerCuratedTools(server: McpServer, clients: ClientResolver)
       label: z.string().optional(),
       focus: z.boolean().optional(),
     },
+    route: (args, env) => layoutRoute(args, env),
+    core: bridge ? coreWorkspaceTool(bridge) : undefined,
     handler: async (client, args) => {
       const tool = "herdr_workspace";
       switch (args.action) {

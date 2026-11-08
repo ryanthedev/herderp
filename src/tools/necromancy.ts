@@ -40,7 +40,13 @@ const TURN_ROLES = ["user", "thinking", "text", "tool_use", "tool_result"] as co
  * Registers the necromancy tools on `server`, backed by `necromancy`:
  * find_spaces, search_all, list_sessions, digest, resolve, outline, search, read, anchors.
  */
-export function registerNecromancyTools(server: McpServer, necromancy: Necromancy): void {
+export interface NecromancyToolOptions {
+  /** The current space when the caller passes no workspaceId: herdr's
+   * HERDR_WORKSPACE_ID, else the Herdr app space this terminal is in. */
+  currentWorkspace?: () => Promise<string | undefined>;
+}
+
+export function registerNecromancyTools(server: McpServer, necromancy: Necromancy, options: NecromancyToolOptions = {}): void {
   registerTool(server, {
     name: "necromancy_find_spaces",
     description:
@@ -140,15 +146,16 @@ export function registerNecromancyTools(server: McpServer, necromancy: Necromanc
   registerTool(server, {
     name: "necromancy_resolve",
     description:
-      "Resolves a herdr agent handle like `upublish:1` (workspace label : tab label) to the exact live session it " +
+      "Resolves a handle like `upublish:1` (workspace or Herdr app space name : tab label) to the exact live session it " +
       "addresses, in one shot - use this the moment a target looks like `<space>:<n>` rather than guessing from a " +
       "session list. Returns status:'resolved' with {sessionId, cwd, handle, matchedTabLabel, isCurrent} - feed " +
       "sessionId+cwd straight into necromancy_anchors/read. Other statuses are actionable data, not errors: " +
       "'ambiguous_workspace'/'ambiguous_pane' carry candidates to present; 'not_found' carries a reason " +
       "(workspace/tab/no_claude_agent/...) meaning fall through to necromancy_list_sessions and pick by on-disk " +
-      "index instead. Pass workspaceId ($HERDR_WORKSPACE_ID) to resolve a label-less `:<tab>` against the current " +
-      "space, and currentSessionId ($CLAUDE_CODE_SESSION_ID) so isCurrent flags the running session. A herdr " +
-      "outage surfaces as a tool error (herdr must be running for this) - list_sessions still works without it. " +
+      "index instead. workspaceId (a label-less `:<tab>` resolves against it) defaults to the space this agent runs in " +
+      "(herdr's $HERDR_WORKSPACE_ID, or the Herdr app space of $HC_TERMINAL_ID); pass currentSessionId " +
+      "($CLAUDE_CODE_SESSION_ID) so isCurrent flags the running session. Handles resolve in herdr and the Herdr app " +
+      "alike; only when neither answers is it a tool error - list_sessions still works without them. " +
       "A bare number (`3`) means `:3` - a tab in the current space - not a workspace labeled \"3\". If " +
       "isCurrent is true, that is the running session itself: never read it as the target.",
     inputSchema: {
@@ -156,8 +163,10 @@ export function registerNecromancyTools(server: McpServer, necromancy: Necromanc
       workspaceId: z.string().optional(),
       currentSessionId: z.string().optional(),
     },
-    handler: async ({ handle, workspaceId, currentSessionId }) =>
-      ({ ...(await necromancy.resolveHandle({ handle, workspaceId, currentSessionId })) }) as Record<string, unknown>,
+    handler: async ({ handle, workspaceId, currentSessionId }) => {
+      const current = workspaceId ?? (await options.currentWorkspace?.());
+      return { ...(await necromancy.resolveHandle({ handle, workspaceId: current, currentSessionId })) } as Record<string, unknown>;
+    },
   });
 
   registerTool(server, {

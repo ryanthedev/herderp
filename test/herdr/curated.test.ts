@@ -493,3 +493,56 @@ describe("host routing", () => {
     expect(text).toBe('[unknown_host] unknown host "nope"');
   });
 });
+
+describe("herdr_agent watch - a command for the Monitor tool", () => {
+  it("resolves the targets and returns a quoted command, description, and Monitor's max timeout", async () => {
+    const asked: string[] = [];
+    const tools = withTools({
+      agentGet: async (target) => {
+        asked.push(target);
+        return STUB_AGENT;
+      },
+    });
+    const { isError, body } = await call(tools, "herdr_agent", {
+      action: "watch",
+      targets: ["lead", "cap's"],
+      stallMs: 600000,
+      once: true,
+    });
+    expect(isError).toBeFalsy();
+    expect(asked).toEqual(["lead", "cap's"]);
+    expect(body.command).toMatch(/^'bun' 'run' '[^']*\/src\/watch\/cli\.ts' 'lead' 'cap'\\''s' '--stall' '600000' '--once'$/);
+    expect(body.timeout_ms).toBe(1_800_000);
+    expect(body.description).toBe("herdr agents: lead, cap's");
+    expect(body.targets).toEqual([
+      { target: "lead", paneId: "w1:p1", status: "idle" },
+      { target: "cap's", paneId: "w1:p1", status: "idle" },
+    ]);
+    expect(String(body.hint)).toContain("Monitor");
+  });
+
+  it("accepts a single target", async () => {
+    const { body } = await call(withTools(), "herdr_agent", { action: "watch", target: "lead" });
+    expect(String(body.command)).toEndWith("'lead'");
+  });
+
+  it("fails fast on a target herdr can't find", async () => {
+    const tools = withTools({
+      agentGet: async () => {
+        throw new HerdrError("agent_not_found", "agent target nope not found");
+      },
+    });
+    const { isError, text } = await call(tools, "herdr_agent", { action: "watch", target: "nope" });
+    expect(isError).toBe(true);
+    expect(text).toContain("agent_not_found");
+  });
+
+  it("requires a target and refuses a remote host", async () => {
+    const tools = withTools();
+    expect((await call(tools, "herdr_agent", { action: "watch" })).text).toContain('requires "target" or "targets"');
+    const remote = await call(tools, "herdr_agent", { action: "watch", target: "lead", host: "ska" });
+    expect(remote.isError).toBe(true);
+    expect(remote.text).toContain("this machine only");
+    expect((await call(tools, "herdr_agent", { action: "watch", target: "lead", host: "local" })).isError).toBeFalsy();
+  });
+});

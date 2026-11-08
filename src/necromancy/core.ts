@@ -17,6 +17,9 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { HerdrClient } from "../herdr/client.js";
+import type { LiveView } from "../core/view.js";
+import { CoreError } from "../core/types.js";
+import { isNotInstalled } from "../bridge/absent.js";
 import { HerdrError, type Pane, type Tab, type Workspace } from "../herdr/types.js";
 import { parseSessionPreview } from "./preview.js";
 import { ANCHOR_CATEGORIES, extractAnchors, type AnchorItem, type Anchors } from "./anchors.js";
@@ -75,6 +78,10 @@ export class NecromancyError extends Error {
 
 export interface NecromancyOptions {
   client: HerdrClient;
+  /** More engines to join live state from (the Herdr app's herdr-core, via
+   * core/view.ts). Each is read like `client`; one that fails degrades the
+   * answer instead of failing it. */
+  liveViews?: LiveView[];
   /** Graveyard root. Default: ~/.claude/projects. Tests inject a temp fixture dir. */
   projectsRoot?: string;
   /** Session files larger than this are skipped by stat alone - never read. Default 32 MiB. */
@@ -124,6 +131,8 @@ export interface FindSpacesResult {
   /** True when herdr was unreachable: every on-disk space is still listed,
    * but label/workspaceId are null for all of them (live join unknown). */
   degraded: boolean;
+  /** Which engines didn't answer, once more than herdr is in play. */
+  degradedEngines?: string[];
 }
 
 export interface SearchAllSessionsOptions {
@@ -204,6 +213,8 @@ export interface ListSessionsResult {
    * determined - the on-disk sessions are still returned (live all false),
    * never a raw error. Callers must say live status is unknown. */
   degraded: boolean;
+  /** Which engines didn't answer, once more than herdr is in play. */
+  degradedEngines?: string[];
 }
 
 export interface SessionDigestOptions {
@@ -258,6 +269,8 @@ export interface SessionDigestResult {
 export type ResolveHandleResult =
   | {
       status: "resolved";
+      /** Which engine runs it ("herdr", "core"); set once more than herdr is in play. */
+      engine?: string;
       sessionId: string;
       cwd: string;
       workspaceLabel: string;
@@ -272,15 +285,20 @@ export type ResolveHandleResult =
   | {
       status: "ambiguous_workspace";
       query: string;
-      candidates: { workspaceId: string; label: string | null; cwd: string }[];
+      degradedEngines?: string[];
+      /** `engine` is set once more than herdr is in play. */
+      candidates: { workspaceId: string; label: string | null; cwd: string; engine?: string }[];
     }
   | {
       status: "ambiguous_pane";
+      degradedEngines?: string[];
       workspaceLabel: string;
       candidates: { paneId: string; sessionId: string; tabLabel: string | null; cwd: string }[];
     }
   | {
       status: "not_found";
+      /** Engines that didn't answer: the miss may be theirs. */
+      degradedEngines?: string[];
       reason: "invalid_handle" | "no_current_workspace" | "workspace" | "tab" | "no_claude_agent";
       detail: string;
     };
@@ -320,6 +338,11 @@ interface SessionFile {
   path: string;
   size: number;
   mtimeMs: number;
+}
+
+/** An engine that couldn't answer - degrade, don't fail. Anything else stays loud. */
+function isEngineError(error: unknown): boolean {
+  return error instanceof HerdrError || error instanceof CoreError;
 }
 
 function isEnoent(error: unknown): boolean {
@@ -382,6 +405,36 @@ export function createNecromancy(options: NecromancyOptions) {
     maxSessionHits = DEFAULT_MAX_SESSION_HITS,
     maxScannedSessions = DEFAULT_MAX_SCANNED_SESSIONS,
   } = options;
+  const views: LiveView[] = [client, ...(options.liveViews ?? [])];
+  const multiEngine = views.length > 1;
+  /** A view's engine name: core/view.ts tags its own; the herdr client is "herdr". */
+  const engineOf = (view: LiveView): string => (view as { engine?: string }).engine ?? "herdr";
+
+  /** One list call across every engine: each row with the view it came from,
+   * and the errors of the engines that couldn't answer. */
+  async function acrossViews<T>(
+    call: (view: LiveView) => Promise<T[]>,
+  ): Promise<{ rows: Array<{ view: LiveView; row: T }>; errors: unknown[]; degradedEngines: string[]; asked: number }> {
+    const results = await Promise.all(
+      views.map(async (view) => {
+        try {
+          return { view, rows: await call(view), error: null };
+        } catch (error) {
+          if (!isEngineError(error)) throw error; // non-engine faults stay loud
+          return { view, rows: [] as T[], error };
+        }
+      }),
+    );
+    // An engine that isn't installed here was never part of the answer: it
+    // neither degrades it nor counts as asked.
+    const failed = results.filter((r) => r.error !== null && !isNotInstalled(r.error));
+    return {
+      rows: results.flatMap((r) => r.rows.map((row) => ({ view: r.view, row }))),
+      errors: failed.map((r) => r.error),
+      degradedEngines: failed.map((r) => engineOf(r.view)),
+      asked: results.filter((r) => !isNotInstalled(r.error)).length,
+    };
+  }
 
   /**
    * UUID-named `.jsonl` files directly inside `dir`, newest-mtime first.
@@ -483,14 +536,10 @@ export function createNecromancy(options: NecromancyOptions) {
     // enrichment, so a herdr outage degrades it (like listSessions) instead of
     // hiding the on-disk spaces that reading depends on.
     const liveBySlug = new Map<string, { id: string; label: string | null; cwd: string }>();
-    let degraded = false;
-    let workspaces: Workspace[] = [];
-    try {
-      workspaces = await client.workspaceList();
-    } catch (error) {
-      if (!(error instanceof HerdrError)) throw error; // non-herdr faults stay loud
-      degraded = true;
-    }
+    const listed = await acrossViews((view) => view.workspaceList());
+    const degraded = listed.errors.length > 0;
+    const degradedEngines = multiEngine && degraded ? { degradedEngines: listed.degradedEngines } : {};
+    const workspaces: Workspace[] = listed.rows.map((r) => r.row);
     for (const workspace of workspaces) {
       if (workspace.cwd === "") continue;
       const slug = deriveSlug(workspace.cwd);
@@ -526,7 +575,7 @@ export function createNecromancy(options: NecromancyOptions) {
 
     const total = matched.length;
     const capped = matched.slice(0, Math.max(0, limit));
-    return { spaces: capped, total, truncated: capped.length < total, degraded };
+    return { spaces: capped, total, truncated: capped.length < total, degraded, ...degradedEngines };
   }
 
   async function listSessions(
@@ -546,22 +595,21 @@ export function createNecromancy(options: NecromancyOptions) {
     // graveyard that reading depends on - but stays honest via `degraded`.
     const liveIds = new Set<string>();
     const handleBySession = new Map<string, string>();
-    let degraded = false;
-    let agents;
-    try {
-      agents = await client.agentList();
-    } catch (error) {
-      if (!(error instanceof HerdrError)) throw error; // non-herdr faults stay loud
-      agents = null;
-      degraded = true; // live status is unknown - the whole point of `degraded`
-    }
-    if (agents) {
-      for (const agent of agents) if (agent.sessionId) liveIds.add(agent.sessionId);
-      // Handle enrichment sits ON TOP of the live flag and needs two more herdr
+    // Live status is unknown for an engine that didn't answer - the whole
+    // point of `degraded`. Each engine that did answer still marks its own.
+    const listed = await acrossViews((view) => view.agentList());
+    const degraded = listed.errors.length > 0;
+    const degradedEngines = multiEngine && degraded ? { degradedEngines: listed.degradedEngines } : {};
+    const answered = new Set(views.filter((view) => listed.rows.some((r) => r.view === view)));
+    for (const { row: agent } of listed.rows) if (agent.sessionId) liveIds.add(agent.sessionId);
+    for (const view of views) {
+      const agents = listed.rows.filter((r) => r.view === view).map((r) => r.row);
+      if (agents.length === 0 && !answered.has(view)) continue;
+      // Handle enrichment sits ON TOP of the live flag and needs two more
       // calls; if only those fail we keep the (known) live flags and just skip
       // handles - a missing handle is not a degraded listing.
       try {
-        const [workspaces, tabs] = await Promise.all([client.workspaceList(), client.tabList()]);
+        const [workspaces, tabs] = await Promise.all([view.workspaceList(), view.tabList()]);
         const wsLabelById = new Map(workspaces.map((w) => [w.id, w.label ?? w.id]));
         const tabLabelById = new Map(tabs.map((t) => [t.id, t.label]));
         for (const agent of agents) {
@@ -572,7 +620,7 @@ export function createNecromancy(options: NecromancyOptions) {
           handleBySession.set(agent.sessionId, tabLabel != null ? `${wsLabel}:${tabLabel}` : wsLabel);
         }
       } catch (error) {
-        if (!(error instanceof HerdrError)) throw error; // non-herdr faults stay loud
+        if (!isEngineError(error)) throw error; // non-engine faults stay loud
       }
     }
 
@@ -596,7 +644,7 @@ export function createNecromancy(options: NecromancyOptions) {
         ...(currentSessionId !== undefined && file.id === currentSessionId ? { current: true } : {}),
       });
     }
-    return { sessions, degraded }; // scanSessionFiles already ordered newest first
+    return { sessions, degraded, ...degradedEngines }; // scanSessionFiles already ordered newest first
   }
 
   /**
@@ -708,6 +756,16 @@ export function createNecromancy(options: NecromancyOptions) {
    * candidates); herdr being unreachable throws HerdrError (loud).
    */
   async function resolveHandle(options: ResolveHandleOptions): Promise<ResolveHandleResult> {
+    const ctx = { down: [] as string[] };
+    const result = await resolveHandleOnce(options, ctx);
+    // A miss or a tie while an engine is down may just be that engine's
+    // agent: say so, so nobody falls through to an on-disk guess blind.
+    const { down } = ctx;
+    if (result.status === "resolved" || down.length === 0) return result;
+    const note = `; ${down.join(" and ")} did not answer, so this may be incomplete`;
+    return { ...result, degradedEngines: down, ...("detail" in result ? { detail: result.detail + note } : {}) } as ResolveHandleResult;
+  }
+  async function resolveHandleOnce(options: ResolveHandleOptions, ctx: { down: string[] }): Promise<ResolveHandleResult> {
     const { workspaceId, currentSessionId } = options;
     // A bare positive integer is a tab in the CURRENT space (`3` == `:3`) -
     // the way a user types "the agent in tab 3" - not a workspace labeled "3".
@@ -721,7 +779,13 @@ export function createNecromancy(options: NecromancyOptions) {
     const tabRaw = colon === -1 ? "" : raw.slice(colon + 1).trim();
     const tabPart = tabRaw === "" ? undefined : tabRaw;
 
-    const workspaces = await client.workspaceList();
+    // Every engine's workspaces (herdr) and spaces (Herdr app). Only if none
+    // answered is that loud - one being down just narrows what can match.
+    const listed = await acrossViews((view) => view.workspaceList());
+    if (multiEngine) ctx.down.push(...listed.degradedEngines);
+    if (listed.rows.length === 0 && listed.errors.length > 0 && listed.errors.length === listed.asked) throw listed.errors[0];
+    const workspaces = listed.rows.map((r) => r.row);
+    const viewOf = new Map(listed.rows.map((r) => [r.row, r.view]));
     let ws: Workspace | undefined;
     if (labelPart === "") {
       if (!workspaceId) {
@@ -738,22 +802,59 @@ export function createNecromancy(options: NecromancyOptions) {
     } else {
       const match = matchWorkspace(workspaces, labelPart);
       if (match.kind === "none") {
-        return { status: "not_found", reason: "workspace", detail: `no herdr workspace matched "${labelPart}"` };
+        return { status: "not_found", reason: "workspace", detail: multiEngine ? `no herdr workspace or Herdr app space matched "${labelPart}"` : `no herdr workspace matched "${labelPart}"` };
       }
       if (match.kind === "many") {
+        // The same name in two engines is the normal state while moving from
+        // herdr to the Herdr app. Try each engine's candidate: if exactly one
+        // reaches a live Claude session, that's the one; else present them all.
+        const engines = new Set(match.workspaces.map((w) => viewOf.get(w)));
+        if (engines.size > 1) {
+          // One engine failing mid-lookup only means its candidate didn't resolve.
+          const results = await Promise.all(
+            match.workspaces.map(async (w) => {
+              const view = viewOf.get(w) ?? client;
+              try {
+                return await resolveIn(w, view, tabPart, currentSessionId);
+              } catch (error) {
+                if (!isEngineError(error)) throw error;
+                if (!ctx.down.includes(engineOf(view))) ctx.down.push(engineOf(view));
+                return null;
+              }
+            }),
+          );
+          const hits = results.filter((r) => r !== null && r.status === "resolved");
+          if (hits.length === 1) return hits[0]!;
+        }
         return {
           status: "ambiguous_workspace",
           query: labelPart,
-          candidates: match.workspaces.map((w) => ({ workspaceId: w.id, label: w.label, cwd: w.cwd })),
+          candidates: match.workspaces.map((w) => ({
+            workspaceId: w.id,
+            label: w.label,
+            cwd: w.cwd,
+            ...(multiEngine ? { engine: engineOf(viewOf.get(w) ?? client) } : {}),
+          })),
         };
       }
       ws = match.workspace;
     }
 
+    return resolveIn(ws, viewOf.get(ws) ?? client, tabPart, currentSessionId);
+  }
+
+  /** The second half of resolveHandle: one workspace (in the engine that
+   * listed it), its tab, and that tab's single live Claude pane. */
+  async function resolveIn(
+    ws: Workspace,
+    view: LiveView,
+    tabPart: string | undefined,
+    currentSessionId: string | undefined,
+  ): Promise<ResolveHandleResult> {
     const wsLabel = ws.label ?? ws.id;
-    const [tabs, panes] = await Promise.all([client.tabList(ws.id), client.paneList(ws.id)]);
-    const wsTabs = tabs.filter((t) => t.workspaceId === ws!.id);
-    const wsPanes = panes.filter((p) => p.workspaceId === ws!.id);
+    const [tabs, panes] = await Promise.all([view.tabList(ws.id), view.paneList(ws.id)]);
+    const wsTabs = tabs.filter((t) => t.workspaceId === ws.id);
+    const wsPanes = panes.filter((p) => p.workspaceId === ws.id);
     const tabLabelById = new Map(wsTabs.map((t) => [t.id, t.label]));
     const claudePanes = wsPanes.filter((p) => p.agent === "claude" && UUID_RE.test(p.sessionId));
 
@@ -801,6 +902,7 @@ export function createNecromancy(options: NecromancyOptions) {
     const pane = candidatePanes[0]!;
     return {
       status: "resolved",
+      ...(multiEngine ? { engine: engineOf(view) } : {}),
       sessionId: pane.sessionId,
       cwd: pane.cwd,
       workspaceLabel: wsLabel,

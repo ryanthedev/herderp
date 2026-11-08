@@ -1,5 +1,5 @@
 ---
-description: Catch up on past Claude Code work in this herdr space - the previous session by default, or a named agent, space, handle (upublish:1), or session id. Plain summary, current state, open threads, and questions to resume. Reading only; never revives a session.
+description: Catch up on past Claude Code work in this herdr or Herdr app space - the previous session by default, or a named agent, space, handle (upublish:1), or session id. Plain summary, current state, open threads, and questions to resume. Reading only; never revives a session.
 argument-hint: "[space | <space>:<tab> | session-id] - or nothing for the previous session"
 ---
 

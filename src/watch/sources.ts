@@ -8,7 +8,7 @@
 
 import type { CoreClient } from "../core/client.js";
 import { subscribeCoreEvents, type CoreSubscribeOptions } from "../core/events.js";
-import type { SessionLookup } from "../core/sessions.js";
+import { isAtShell, type SessionLookup } from "../core/sessions.js";
 import { CoreError, type CoreTerminal } from "../core/types.js";
 import type { HerdrClient } from "../herdr/client.js";
 import { toAgentStatus } from "../herdr/client.js";
@@ -95,6 +95,9 @@ export function coreSource(
     async get(id) {
       const terminal = await core.terminalGet(id);
       if (terminal.state !== "live") throw new CoreError("finished", `terminal ${terminal.address} has finished`);
+      // herdr-core keeps the last status word after the agent exits, so a
+      // terminal back at its shell is the agent gone, whatever the status says.
+      if (isAtShell(terminal)) throw new CoreError("agent_exited", `terminal ${terminal.address} is back at its shell`);
       return {
         key: terminal.address,
         status: coreWatchStatus(terminal),
@@ -106,6 +109,7 @@ export function coreSource(
       if (!(error instanceof CoreError)) return null;
       if (error.code === "not_found") return "no longer in herdr-core (terminal removed)";
       if (error.code === "finished") return "its program ended (terminal finished)";
+      if (error.code === "agent_exited") return "agent exited (the terminal is back at its shell)";
       return null;
     },
     subscribe(keys, handlers, onClose) {
@@ -116,6 +120,13 @@ export function coreSource(
           const gone = CORE_GONE_EVENTS[event.type];
           if (gone) {
             handlers.gone(event.terminal, gone);
+            return;
+          }
+          if (event.type === "foreground") {
+            const argv = Array.isArray(event.data.argv) ? event.data.argv.filter((a): a is string => typeof a === "string") : [];
+            if (isAtShell({ foreground: { pid: 0, argv, cwd: "" } })) {
+              handlers.gone(event.terminal, "agent exited (the terminal is back at its shell)");
+            }
             return;
           }
           if (event.type !== "status" || !("status" in event.data)) return;

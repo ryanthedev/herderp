@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createSessionLookup, isClaudeTerminal } from "../../src/core/sessions.js";
+import { createSessionLookup, isAtShell, isClaudeTerminal } from "../../src/core/sessions.js";
 import type { CoreTerminal } from "../../src/core/types.js";
 
 const SESSION = "ff1fc07d-9002-48b1-afa9-2e44e7ac6d73";
@@ -63,7 +63,20 @@ describe("createSessionLookup", () => {
     }
   });
 
-  it("recognizes Claude by reported app or by argv[0]", () => {
+  it("a stale claude-code report with another program in front is not Claude", async () => {
+    // herdr-core keeps the last app after its program exits; a reused pid must not borrow the session.
+    const vim = terminal({ app: "claude-code", foreground: { pid: 3096, argv: ["vim", "x"], cwd: "/x" } });
+    expect(isClaudeTerminal(vim)).toBe(false);
+    expect(await createSessionLookup(dir)(vim)).toBeNull();
+  });
+
+  it("isAtShell: an interactive shell is a prompt; a shell running a script is not", () => {
+    const fg = (argv: string[]) => terminal({ foreground: { pid: 1, argv, cwd: "/" } });
+    for (const argv of [["/bin/zsh", "-l"], ["-zsh"], ["bash"], ["/bin/zsh", "-li"]]) expect(isAtShell(fg(argv))).toBe(true);
+    for (const argv of [["sh", "/tmp/x.sh"], ["sh", "-c", "make"], ["claude"], ["node", "x"]]) expect(isAtShell(fg(argv))).toBe(false);
+  });
+
+  it("recognizes Claude by its program name", () => {
     expect(isClaudeTerminal(terminal())).toBe(true);
     expect(isClaudeTerminal(terminal({ app: "", foreground: { pid: 1, argv: ["/opt/bin/claude", "-c"], cwd: "/" } }))).toBe(true);
     expect(isClaudeTerminal(terminal({ app: "codex", foreground: { pid: 1, argv: ["codex"], cwd: "/" } }))).toBe(false);

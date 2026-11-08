@@ -27,8 +27,9 @@ function fakeStream() {
   return { spawn, written, push: (line: string | null) => push(line) };
 }
 
-const event = (type: string, terminal: string, data: Record<string, unknown>) =>
-  JSON.stringify({ jsonrpc: "2.0", method: "event", params: { type, terminal, seq: 1, data } });
+let seq = 100;
+const event = (type: string, terminal: string, data: Record<string, unknown>, at = ++seq) =>
+  JSON.stringify({ jsonrpc: "2.0", method: "event", params: { type, terminal, seq: at, data } });
 
 describe("subscribeCoreEvents", () => {
   it("subscribes, then delivers events and ignores heartbeats and junk", async () => {
@@ -43,6 +44,20 @@ describe("subscribeCoreEvents", () => {
     fake.push(event("status", "t1", { status: { state: "done" } }));
     await Bun.sleep(5);
     expect(events).toEqual([{ type: "status", terminal: "t1", data: { status: { state: "done" } } }]);
+    stream.close();
+  });
+
+  it("drops events at or below the snapshot's seq, and replays of older ones", async () => {
+    const fake = fakeStream();
+    const events: CoreEvent[] = [];
+    const pending = subscribeCoreEvents({ spawn: fake.spawn, onEvent: (e) => events.push(e), onClose: () => {} });
+    fake.push(`{"jsonrpc":"2.0","id":1,"result":{"seq":50,"terminals":[]}}`);
+    const stream = await pending;
+    fake.push(event("status", "t1", { status: { state: "working" } }, 49));
+    fake.push(event("status", "t1", { status: { state: "done" } }, 52));
+    fake.push(event("status", "t1", { status: { state: "working" } }, 51));
+    await Bun.sleep(5);
+    expect(events.map((e) => (e.data.status as { state: string }).state)).toEqual(["done"]);
     stream.close();
   });
 
@@ -129,6 +144,19 @@ describe("coreSource", () => {
     s.emit({ type: "status", terminal: "t7", data: { status: null } });
     s.emit({ type: "finished", terminal: "t7", data: {} });
     expect(seen).toEqual(["t7 error", "t7 gone agent exited (it stopped reporting status)", "t7 gone its program ended (terminal finished)"]);
+  });
+
+  it("an agent exiting to its shell is gone, even though core keeps its last status word", async () => {
+    // Live 2026-11-08: after the reporting program exits, `hc get` still shows its old status.
+    const atShell = terminal({ status: "done", foreground: { pid: 1, argv: ["/bin/zsh", "-li"], cwd: "/b" } });
+    const s = scriptedCore(() => atShell);
+    const err = await s.source.get("t7").catch((e) => e);
+    expect(s.source.goneDetail(err)).toContain("back at its shell");
+    const seen: string[] = [];
+    await s.source.subscribe(["t7"], { status: () => {}, gone: (k, d) => seen.push(`${k} ${d}`) }, () => {});
+    s.emit({ type: "foreground", terminal: "t7", data: { argv: ["sh", "/tmp/build.sh"], pid: 2 } }); // a script, not a prompt
+    s.emit({ type: "foreground", terminal: "t7", data: { argv: ["-zsh"], pid: 3 } });
+    expect(seen).toEqual(["t7 agent exited (the terminal is back at its shell)"]);
   });
 });
 

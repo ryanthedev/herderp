@@ -23,11 +23,31 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** The Claude session id running in a terminal, or null with no guess. */
 export type SessionLookup = (terminal: CoreTerminal) => Promise<string | null>;
 
-/** True when the terminal's foreground looks like Claude Code. */
+/**
+ * True when Claude Code is the terminal's foreground program right now.
+ * The program must be `claude` by name: herdr-core keeps a terminal's last
+ * reported app after the program that reported it exits, so `app` alone can
+ * name a Claude that is gone (and whose pid may be reused). No foreground
+ * (a finished terminal) means no Claude.
+ */
 export function isClaudeTerminal(terminal: CoreTerminal): boolean {
-  if (terminal.app === "claude-code") return true;
-  const argv0 = terminal.foreground?.argv[0];
-  return argv0 !== undefined && basename(argv0) === "claude";
+  const argv = terminal.foreground?.argv;
+  if (!argv || argv.length === 0) return false;
+  // `claude ...`, or a script runner launching it (`node /path/claude`, `bun x claude`).
+  return argv.slice(0, 2).some((arg) => basename(arg) === "claude");
+}
+
+const SHELLS: ReadonlySet<string> = new Set(["sh", "bash", "zsh", "fish", "dash", "ksh", "nu", "tcsh", "csh", "pwsh"]);
+
+/**
+ * True when the terminal is back at an interactive shell: whatever agent ran
+ * there has exited. `zsh -l` or `-zsh` is a shell prompt; `sh script.sh` or
+ * `sh -c '...'` is a program that happens to be run by a shell.
+ */
+export function isAtShell(terminal: Pick<CoreTerminal, "foreground">): boolean {
+  const argv = terminal.foreground?.argv;
+  if (!argv || argv.length === 0 || !SHELLS.has(basename(argv[0]!).replace(/^-/, ""))) return false;
+  return argv.slice(1).every((arg) => arg.startsWith("-") && arg !== "-c");
 }
 
 export function createSessionLookup(sessionsDir = join(homedir(), ".claude", "sessions")): SessionLookup {

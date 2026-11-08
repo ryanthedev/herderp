@@ -19,6 +19,7 @@ import { join } from "node:path";
 import type { HerdrClient } from "../herdr/client.js";
 import type { LiveView } from "../core/view.js";
 import { CoreError } from "../core/types.js";
+import { isNotInstalled } from "../bridge/absent.js";
 import { HerdrError, type Pane, type Tab, type Workspace } from "../herdr/types.js";
 import { parseSessionPreview } from "./preview.js";
 import { ANCHOR_CATEGORIES, extractAnchors, type AnchorItem, type Anchors } from "./anchors.js";
@@ -130,6 +131,8 @@ export interface FindSpacesResult {
   /** True when herdr was unreachable: every on-disk space is still listed,
    * but label/workspaceId are null for all of them (live join unknown). */
   degraded: boolean;
+  /** Which engines didn't answer, once more than herdr is in play. */
+  degradedEngines?: string[];
 }
 
 export interface SearchAllSessionsOptions {
@@ -210,6 +213,8 @@ export interface ListSessionsResult {
    * determined - the on-disk sessions are still returned (live all false),
    * never a raw error. Callers must say live status is unknown. */
   degraded: boolean;
+  /** Which engines didn't answer, once more than herdr is in play. */
+  degradedEngines?: string[];
 }
 
 export interface SessionDigestOptions {
@@ -280,16 +285,20 @@ export type ResolveHandleResult =
   | {
       status: "ambiguous_workspace";
       query: string;
+      degradedEngines?: string[];
       /** `engine` is set once more than herdr is in play. */
       candidates: { workspaceId: string; label: string | null; cwd: string; engine?: string }[];
     }
   | {
       status: "ambiguous_pane";
+      degradedEngines?: string[];
       workspaceLabel: string;
       candidates: { paneId: string; sessionId: string; tabLabel: string | null; cwd: string }[];
     }
   | {
       status: "not_found";
+      /** Engines that didn't answer: the miss may be theirs. */
+      degradedEngines?: string[];
       reason: "invalid_handle" | "no_current_workspace" | "workspace" | "tab" | "no_claude_agent";
       detail: string;
     };
@@ -403,7 +412,9 @@ export function createNecromancy(options: NecromancyOptions) {
 
   /** One list call across every engine: each row with the view it came from,
    * and the errors of the engines that couldn't answer. */
-  async function acrossViews<T>(call: (view: LiveView) => Promise<T[]>): Promise<{ rows: Array<{ view: LiveView; row: T }>; errors: unknown[] }> {
+  async function acrossViews<T>(
+    call: (view: LiveView) => Promise<T[]>,
+  ): Promise<{ rows: Array<{ view: LiveView; row: T }>; errors: unknown[]; degradedEngines: string[]; asked: number }> {
     const results = await Promise.all(
       views.map(async (view) => {
         try {
@@ -414,9 +425,14 @@ export function createNecromancy(options: NecromancyOptions) {
         }
       }),
     );
+    // An engine that isn't installed here was never part of the answer: it
+    // neither degrades it nor counts as asked.
+    const failed = results.filter((r) => r.error !== null && !isNotInstalled(r.error));
     return {
       rows: results.flatMap((r) => r.rows.map((row) => ({ view: r.view, row }))),
-      errors: results.filter((r) => r.error !== null).map((r) => r.error),
+      errors: failed.map((r) => r.error),
+      degradedEngines: failed.map((r) => engineOf(r.view)),
+      asked: results.filter((r) => !isNotInstalled(r.error)).length,
     };
   }
 
@@ -522,6 +538,7 @@ export function createNecromancy(options: NecromancyOptions) {
     const liveBySlug = new Map<string, { id: string; label: string | null; cwd: string }>();
     const listed = await acrossViews((view) => view.workspaceList());
     const degraded = listed.errors.length > 0;
+    const degradedEngines = multiEngine && degraded ? { degradedEngines: listed.degradedEngines } : {};
     const workspaces: Workspace[] = listed.rows.map((r) => r.row);
     for (const workspace of workspaces) {
       if (workspace.cwd === "") continue;
@@ -558,7 +575,7 @@ export function createNecromancy(options: NecromancyOptions) {
 
     const total = matched.length;
     const capped = matched.slice(0, Math.max(0, limit));
-    return { spaces: capped, total, truncated: capped.length < total, degraded };
+    return { spaces: capped, total, truncated: capped.length < total, degraded, ...degradedEngines };
   }
 
   async function listSessions(
@@ -582,6 +599,7 @@ export function createNecromancy(options: NecromancyOptions) {
     // point of `degraded`. Each engine that did answer still marks its own.
     const listed = await acrossViews((view) => view.agentList());
     const degraded = listed.errors.length > 0;
+    const degradedEngines = multiEngine && degraded ? { degradedEngines: listed.degradedEngines } : {};
     const answered = new Set(views.filter((view) => listed.rows.some((r) => r.view === view)));
     for (const { row: agent } of listed.rows) if (agent.sessionId) liveIds.add(agent.sessionId);
     for (const view of views) {
@@ -626,7 +644,7 @@ export function createNecromancy(options: NecromancyOptions) {
         ...(currentSessionId !== undefined && file.id === currentSessionId ? { current: true } : {}),
       });
     }
-    return { sessions, degraded }; // scanSessionFiles already ordered newest first
+    return { sessions, degraded, ...degradedEngines }; // scanSessionFiles already ordered newest first
   }
 
   /**
@@ -738,6 +756,16 @@ export function createNecromancy(options: NecromancyOptions) {
    * candidates); herdr being unreachable throws HerdrError (loud).
    */
   async function resolveHandle(options: ResolveHandleOptions): Promise<ResolveHandleResult> {
+    const ctx = { down: [] as string[] };
+    const result = await resolveHandleOnce(options, ctx);
+    // A miss or a tie while an engine is down may just be that engine's
+    // agent: say so, so nobody falls through to an on-disk guess blind.
+    const { down } = ctx;
+    if (result.status === "resolved" || down.length === 0) return result;
+    const note = `; ${down.join(" and ")} did not answer, so this may be incomplete`;
+    return { ...result, degradedEngines: down, ...("detail" in result ? { detail: result.detail + note } : {}) } as ResolveHandleResult;
+  }
+  async function resolveHandleOnce(options: ResolveHandleOptions, ctx: { down: string[] }): Promise<ResolveHandleResult> {
     const { workspaceId, currentSessionId } = options;
     // A bare positive integer is a tab in the CURRENT space (`3` == `:3`) -
     // the way a user types "the agent in tab 3" - not a workspace labeled "3".
@@ -754,7 +782,8 @@ export function createNecromancy(options: NecromancyOptions) {
     // Every engine's workspaces (herdr) and spaces (Herdr app). Only if none
     // answered is that loud - one being down just narrows what can match.
     const listed = await acrossViews((view) => view.workspaceList());
-    if (listed.rows.length === 0 && listed.errors.length === views.length) throw listed.errors[0];
+    if (multiEngine) ctx.down.push(...listed.degradedEngines);
+    if (listed.rows.length === 0 && listed.errors.length > 0 && listed.errors.length === listed.asked) throw listed.errors[0];
     const workspaces = listed.rows.map((r) => r.row);
     const viewOf = new Map(listed.rows.map((r) => [r.row, r.view]));
     let ws: Workspace | undefined;
@@ -781,8 +810,20 @@ export function createNecromancy(options: NecromancyOptions) {
         // reaches a live Claude session, that's the one; else present them all.
         const engines = new Set(match.workspaces.map((w) => viewOf.get(w)));
         if (engines.size > 1) {
-          const results = await Promise.all(match.workspaces.map((w) => resolveIn(w, viewOf.get(w) ?? client, tabPart, currentSessionId)));
-          const hits = results.filter((r) => r.status === "resolved");
+          // One engine failing mid-lookup only means its candidate didn't resolve.
+          const results = await Promise.all(
+            match.workspaces.map(async (w) => {
+              const view = viewOf.get(w) ?? client;
+              try {
+                return await resolveIn(w, view, tabPart, currentSessionId);
+              } catch (error) {
+                if (!isEngineError(error)) throw error;
+                if (!ctx.down.includes(engineOf(view))) ctx.down.push(engineOf(view));
+                return null;
+              }
+            }),
+          );
+          const hits = results.filter((r) => r !== null && r.status === "resolved");
           if (hits.length === 1) return hits[0]!;
         }
         return {

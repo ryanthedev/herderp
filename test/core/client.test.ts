@@ -116,6 +116,13 @@ describe("createConnectRpc", () => {
     expect(fake.killed()).toBe(1);
   });
 
+  it("reports not_installed when hc isn't on this machine", async () => {
+    const rpc = createConnectRpc(["hc", "connect"], () => {
+      throw Object.assign(new Error('Executable not found in $PATH: "hc"'), { code: "ENOENT" });
+    });
+    expect((await failure(rpc("x", {}))).code).toBe("not_installed");
+  });
+
   it("reports core_unreachable when hc can't be started", async () => {
     const rpc = createConnectRpc(["hc", "connect"], () => {
       throw new Error("ENOENT: hc");

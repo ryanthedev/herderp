@@ -26,6 +26,7 @@ export type LiveView = Pick<HerdrClient, "agentList" | "workspaceList" | "tabLis
 
 function toAgentStatus(terminal: CoreTerminal | undefined): AgentStatus {
   const status = terminal?.status;
+  if (status === "error") return "done"; // it stopped (badly) - not "never reported"
   return status === "idle" || status === "working" || status === "blocked" || status === "done" ? status : "unknown";
 }
 

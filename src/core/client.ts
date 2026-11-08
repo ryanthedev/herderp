@@ -115,6 +115,7 @@ export function createConnectRpc(command: string[] = ["hc", "connect"], spawn: C
     try {
       proc = spawn(command);
     } catch (cause) {
+      if (isEnoent(cause)) throw new CoreError("not_installed", `\`${command[0]}\` is not installed here (herdr-core / the Herdr app)`, { cause });
       throw new CoreError("core_unreachable", `could not start \`${command.join(" ")}\`: ${errorMessage(cause)}`, { cause });
     }
     const stderrText = new Response(proc.stderr).text().catch(() => "");
@@ -187,14 +188,31 @@ function unwrapReply(reply: Record<string, unknown>, method: string): unknown {
   return reply.result;
 }
 
+/** A hung window must not hang every call behind it. */
+const APP_TIMEOUT_MS = 15_000;
+
 async function bunAppRunner(argv: string[]): Promise<AppRunResult> {
   const proc = Bun.spawn(["herdr-app", ...argv], { stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { stdout, stderr, exitCode };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]).then(
+        ([stdout, stderr, exitCode]) => ({ stdout, stderr, exitCode }),
+      ),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          proc.kill();
+          reject(new CoreError("timeout", `herdr-app ${argv[0]} did not answer within ${APP_TIMEOUT_MS / 1000}s`));
+        }, APP_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+function isEnoent(cause: unknown): boolean {
+  return typeof cause === "object" && cause !== null && (cause as { code?: unknown }).code === "ENOENT";
 }
 
 // --- mapping --------------------------------------------------------------
@@ -310,6 +328,8 @@ export function createCoreClient(deps: CoreClientDeps = {}): CoreClient {
     try {
       result = await app(argv);
     } catch (cause) {
+      if (cause instanceof CoreError) throw cause;
+      if (isEnoent(cause)) throw new CoreError("not_installed", "`herdr-app` (the Herdr desktop app) is not installed here", { cause });
       throw new CoreError("app_unreachable", `could not run herdr-app: ${errorMessage(cause)}`, { cause });
     }
     const parsed = tryParseJson(result.stdout.trim());

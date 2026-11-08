@@ -7,7 +7,7 @@
 // what to use instead, rather than doing something close.
 
 import type { CoreClient } from "../core/client.js";
-import type { SessionLookup } from "../core/sessions.js";
+import { isAtShell, type SessionLookup } from "../core/sessions.js";
 import { CoreError, type AppSpace, type CoreTerminal } from "../core/types.js";
 
 
@@ -68,7 +68,8 @@ export function onHost<T extends { machine: string | null }>(rows: T[], host: st
 /** Agents only: terminals whose program reports a status, or that run Claude. */
 export async function coreAgents(core: CoreClient, sessions: SessionLookup, host?: string): Promise<CoreAgentRow[]> {
   const { terminals } = await core.terminalList();
-  const agents = onHost(terminals, host).filter((t) => t.state === "live" && (t.app !== "" || t.status !== null));
+  // A terminal back at its shell keeps its last status word; it isn't an agent any more.
+  const agents = onHost(terminals, host).filter((t) => t.state === "live" && (t.app !== "" || t.status !== null) && !isAtShell(t));
   return Promise.all(agents.map((t) => coreAgentRow(t, sessions)));
 }
 

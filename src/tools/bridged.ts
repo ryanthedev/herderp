@@ -18,6 +18,7 @@ import { CoreError } from "../core/types.js";
 import { engineOfId, pickEngine, qualifyCore, type Engine } from "../bridge/route.js";
 import { resolveAgentTarget } from "../bridge/resolve.js";
 import { adoptAgent } from "../bridge/adopt.js";
+import { isNotInstalled } from "../bridge/absent.js";
 import { planBridgedWatch } from "../watch/command.js";
 import type { BridgeDeps } from "./curated.js";
 import {
@@ -45,6 +46,7 @@ export interface Degraded {
   engine: Engine;
   code: string;
   message: string;
+  absent?: boolean;
 }
 
 /** Runs one engine's half of a list; an engine error becomes a `degraded` entry. */
@@ -53,7 +55,9 @@ async function half<T>(engine: Engine, run: () => Promise<T[]>, degraded: Degrad
     return await run();
   } catch (error) {
     if (error instanceof HerdrError || error instanceof CoreError) {
-      degraded.push({ engine, code: error.code, message: error.message });
+      // Not installed here: not part of this machine's answer, so not "degraded" -
+      // but still recorded, so the all-engines-failed check below can see it.
+      degraded.push({ engine, code: error.code, message: error.message, ...(isNotInstalled(error) && { absent: true }) });
       return [];
     }
     throw error;
@@ -74,7 +78,7 @@ async function both<H, C>(
       `neither engine answered - herdr: [${of("herdr").code}] ${of("herdr").message}; core: [${of("core").code}] ${of("core").message}`,
     );
   }
-  return { rows: [...h, ...c], degraded };
+  return { rows: [...h, ...c], degraded: degraded.filter((d) => !d.absent).map(({ absent: _, ...d }) => d) };
 }
 
 function tagged<T extends object>(rows: T[], extra: (row: T) => Record<string, unknown> = () => ({})) {

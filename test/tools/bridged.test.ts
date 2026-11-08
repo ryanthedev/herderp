@@ -267,4 +267,10 @@ describe("herdr_agent fixes from review", () => {
     expect(text).toContain("herdr: [socket_unreachable]");
     expect(text).toContain("core: [core_unreachable]");
   });
+
+  it("an engine that isn't installed leaves no degraded entry", async () => {
+    const { body } = await setup({ core: { terminalList: async () => { throw new CoreError("not_installed", "no hc"); } } }).call("herdr_agent", { action: "list" });
+    expect(body.agents.map((a: { engine: string }) => a.engine)).toEqual(["herdr"]);
+    expect(body.degraded).toBeUndefined();
+  });
 });

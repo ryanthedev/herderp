@@ -69,6 +69,7 @@ export function subscribeCoreEvents(options: CoreSubscribeOptions): Promise<Core
     }
     let started = false;
     let closed = false;
+    let lastSeq = -1;
     let watchdog: ReturnType<typeof setTimeout> | undefined;
 
     const stop = () => {
@@ -104,6 +105,8 @@ export function subscribeCoreEvents(options: CoreSubscribeOptions): Promise<Core
           return;
         }
         started = true;
+        const result = isRecord(message.result) ? message.result : {};
+        if (typeof result.seq === "number") lastSeq = result.seq; // events after the snapshot follow
         resolve({
           close: () => {
             closed = true;
@@ -113,7 +116,17 @@ export function subscribeCoreEvents(options: CoreSubscribeOptions): Promise<Core
         return;
       }
       if (message.method !== "event" || !isRecord(message.params)) return;
-      const { type, terminal, data } = message.params;
+      const { type, terminal, data, seq } = message.params;
+      // Events arrive in seq order; one at or below the last seen is a replay
+      // (after a `missed` re-sync) and must not undo a newer state.
+      if (typeof seq === "number") {
+        if (seq <= lastSeq) return;
+        lastSeq = seq;
+      }
+      if (typeof terminal !== "string" && type === "missed" && isRecord(data) && typeof data.seq === "number") {
+        lastSeq = Math.max(lastSeq, data.seq);
+        return;
+      }
       if (typeof type !== "string" || typeof terminal !== "string") return;
       options.onEvent({ type, terminal, data: isRecord(data) ? data : {} });
     };

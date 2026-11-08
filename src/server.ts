@@ -45,11 +45,19 @@ function registerStubTool(server: McpServer): void {
 export async function currentWorkspace(core: CoreClient, env: NodeJS.ProcessEnv): Promise<string | undefined> {
   if (env.HERDR_WORKSPACE_ID) return env.HERDR_WORKSPACE_ID;
   if (!env.HC_TERMINAL_ID) return undefined;
+  // A sub-agent (started with `hc run`) has no pane and no `herdr.space`
+  // label of its own: it belongs to its parent's tab, so walk up.
+  let address: string | null = env.HC_TERMINAL_ID;
   try {
-    return (await core.terminalGet(env.HC_TERMINAL_ID)).spaceId ?? undefined;
+    for (let hops = 0; address !== null && hops < 8; hops++) {
+      const terminal = await core.terminalGet(address);
+      if (terminal.spaceId) return terminal.spaceId;
+      address = terminal.parent;
+    }
   } catch {
-    return undefined; // the core is down: resolve as if no current space was given
+    // the core is down: resolve as if no current space was given
   }
+  return undefined;
 }
 
 async function main(): Promise<void> {

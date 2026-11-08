@@ -135,4 +135,36 @@ describe("necromancy with both engines", () => {
     const oneUp = createNecromancy({ client: herdrClient({ down: true }), liveViews: [createCoreView(coreClient(), sessions)], projectsRoot: root });
     expect(await oneUp.resolveHandle({ handle: "api:1" })).toMatchObject({ status: "resolved", engine: "core" });
   });
+
+  it("an engine that isn't installed is not 'degraded'", async () => {
+    const notInstalled = async () => {
+      throw new CoreError("not_installed", "no hc here");
+    };
+    const absentCore = { appSpaces: notInstalled, terminalList: notInstalled } as unknown as CoreClient;
+    const necro = createNecromancy({ client: herdrClient(), liveViews: [createCoreView(absentCore, sessions)], projectsRoot: root });
+    expect((await necro.listSessions(CWD)).degraded).toBe(false);
+    expect((await necro.findSpaces()).degraded).toBe(false);
+  });
+
+  it("an installed engine that is down is degraded, and named", async () => {
+    const necro = createNecromancy({ client: herdrClient(), liveViews: [createCoreView(coreClient(true), sessions)], projectsRoot: root });
+    expect(await necro.listSessions(CWD)).toMatchObject({ degraded: true, degradedEngines: ["core"] });
+  });
+
+  it("a miss while an engine is down says so", async () => {
+    const necro = createNecromancy({ client: herdrClient({ down: true }), liveViews: [createCoreView(coreClient(), sessions)], projectsRoot: root });
+    const result = await necro.resolveHandle({ handle: "nowhere:1" });
+    expect(result).toMatchObject({ status: "not_found", degradedEngines: ["herdr"] });
+    expect(result.status === "not_found" && result.detail).toContain("herdr did not answer");
+  });
+
+  it("one engine failing mid-resolve doesn't sink the other's answer", async () => {
+    const half = herdrClient({ claudeInTab1: true });
+    const slow = async () => {
+      throw new HerdrError("timeout", "herdr slow");
+    };
+    const flaky = { ...half, tabList: slow, paneList: slow } as unknown as HerdrClient;
+    const necro = createNecromancy({ client: flaky, liveViews: [createCoreView(coreClient(), sessions)], projectsRoot: root });
+    expect(await necro.resolveHandle({ handle: "api:1" })).toMatchObject({ status: "resolved", engine: "core" });
+  });
 });

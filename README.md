@@ -45,7 +45,7 @@ The Herdr desktop app doesn't run its terminals on the `herdr` server. They live
 - **What differs on core:**
   - **`read`** takes `lines`: 0, the default, reads the visible screen, which is fast.
   - **`prompt` and `wait`** wait until the agent stops working, so `until` is rejected.
-  - **`start`** opens a new terminal in the window (`kind`, plus optional `argv`, `cwd`, `place`, `name`).
+  - **`start`** opens a new terminal in the window (`kind`, plus optional `argv`, `cwd`, `place`, `name`). Agents (and `adopt`) launch through `env -u` for Claude's per-session markers (`CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_PID`, `CLAUDECODE`, …). A core installed or started from a Claude shell otherwise hands them to every new terminal, and the Claude started there saves no transcript.
   - **`herdr_pane` `focus`** works by pane id, and `run` types into the pane's terminal.
 - **herdr only:** `rename` and `explain` (agent), `move` and pair `swap` (pane), and worktrees. On core these fail with `[unsupported_on_core]` and say what to use instead.
 - **Necromancy** marks sessions live in either engine and resolves handles such as `upublish:1` against herdr workspaces and Herdr app spaces alike.

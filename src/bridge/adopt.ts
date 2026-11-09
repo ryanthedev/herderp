@@ -21,6 +21,7 @@ import { CoreError } from "../core/types.js";
 import type { HerdrClient } from "../herdr/client.js";
 import { replyId } from "../tools/core.js";
 import { BridgeError } from "./resolve.js";
+import { cleanLaunch } from "./cleanenv.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_READY_TIMEOUT_MS = 90_000;
@@ -130,7 +131,8 @@ export async function adoptAgent(options: AdoptOptions, deps: AdoptDeps): Promis
   }
 
   // 2. The destination: a new tab in a given space, or a new space.
-  const argv = ["claude", "--resume", agent.sessionId];
+  // Clean of other sessions' markers, or the resumed Claude would stop saving its transcript.
+  const argv = cleanLaunch(["claude", "--resume", agent.sessionId]);
   let reply: Record<string, unknown>;
   try {
     reply = options.workspaceId

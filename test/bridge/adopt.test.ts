@@ -4,6 +4,7 @@
 
 import { describe, expect, it } from "bun:test";
 import { adoptAgent, type AdoptDeps } from "../../src/bridge/adopt.js";
+import { cleanLaunch } from "../../src/bridge/cleanenv.js";
 import type { CoreClient } from "../../src/core/client.js";
 import type { SessionLookup } from "../../src/core/sessions.js";
 import { CoreError, type CoreTerminal } from "../../src/core/types.js";
@@ -81,7 +82,7 @@ describe("adoptAgent", () => {
   it("resumes the session in a new space named after the herdr workspace, then closes the old pane", async () => {
     const { deps, log } = setup();
     const result = await adoptAgent({ target: "w3:p1" }, deps);
-    expect(log[0]).toBe(`app space.new {"folder":"/repo","argv":["claude","--resume","${SESSION}"],"machine":"","name":"adopt-test"}`);
+    expect(log[0]).toBe(`app space.new ${JSON.stringify({ folder: "/repo", argv: cleanLaunch(["claude", "--resume", SESSION]), machine: "", name: "adopt-test" })}`);
     expect(log.at(-1)).toBe("herdr.paneClose w3:p1");
     expect(result).toMatchObject({ sessionId: SESSION, resumedSessionId: SESSION, to: { terminal: "t4c", workspaceId: "sp1" } });
   });

@@ -19,6 +19,7 @@ import { engineOfId, pickEngine, qualifyCore, type Engine } from "../bridge/rout
 import { resolveAgentTarget } from "../bridge/resolve.js";
 import { adoptAgent } from "../bridge/adopt.js";
 import { isNotInstalled } from "../bridge/absent.js";
+import { cleanLaunch } from "../bridge/cleanenv.js";
 import { planBridgedWatch } from "../watch/command.js";
 import type { BridgeDeps } from "./curated.js";
 import {
@@ -289,7 +290,8 @@ export function coreAgentTool(bridge: BridgeDeps) {
       case "start": {
         const kind = need(args.kind, "kind", tool, "start");
         rejectFields(args, [["paneId", isSet], ["timeoutMs", isSet]], tool, action);
-        const argv = [kind, ...(args.argv ?? [])];
+        // Strip another session's markers: a polluted core would otherwise start a Claude that saves no transcript.
+        const argv = cleanLaunch([kind, ...(args.argv ?? [])]);
         // A space means a new tab there (terminal.open only opens beside the focused pane).
         if (args.workspaceId && args.place && args.place !== "tab") {
           throw new CoreError("unsupported_on_core", `${tool}{action:"start"}: with workspaceId the Herdr app opens a new tab - drop place, or drop workspaceId to split beside the focused pane`);

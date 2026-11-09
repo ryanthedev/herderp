@@ -5,6 +5,7 @@
 import { describe, expect, it } from "bun:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerCuratedTools } from "../../src/tools/curated.js";
+import { cleanLaunch } from "../../src/bridge/cleanenv.js";
 import type { CoreClient } from "../../src/core/client.js";
 import { CoreError, type AppSpace, type CoreTerminal } from "../../src/core/types.js";
 import type { HerdrClient } from "../../src/herdr/client.js";
@@ -136,7 +137,7 @@ describe("herdr_agent across engines", () => {
   it("start goes to the caller's home engine and opens a terminal in the window", async () => {
     const s = setup();
     const { body } = await s.call("herdr_agent", { action: "start", kind: "claude", argv: ["-c"], cwd: "/b", place: "right" });
-    expect(s.calls[0]).toBe('app terminal.open {"argv":["claude","-c"],"folder":"/b","place":"right"}');
+    expect(s.calls[0]).toBe(`app terminal.open ${JSON.stringify({ argv: cleanLaunch(["claude", "-c"]), folder: "/b", place: "right" })}`);
     expect(body.hint).toContain('target:"t9"');
   });
 
@@ -235,7 +236,7 @@ describe("herdr_agent fixes from review", () => {
   it("start with a space opens a tab there; paneId is refused on core", async () => {
     const s = setup();
     await s.call("herdr_agent", { action: "start", kind: "claude", workspaceId: SPACE, name: "x" });
-    expect(s.calls[0]).toBe(`app tab.new {"space":"${SPACE}","argv":["claude"],"name":"x"}`);
+    expect(s.calls[0]).toBe(`app tab.new ${JSON.stringify({ space: SPACE, argv: cleanLaunch(["claude"]), name: "x" })}`);
     const { text } = await s.call("herdr_agent", { action: "start", kind: "claude", workspaceId: SPACE, paneId: PANE });
     expect(text).toStartWith("[unsupported_on_core]");
   });

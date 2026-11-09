@@ -53,6 +53,23 @@ The Herdr desktop app doesn't run its terminals on the `herdr` server. They live
   - **The current space** defaults to `HERDR_WORKSPACE_ID`, else the Herdr app space of `HC_TERMINAL_ID`.
 - **How a core terminal's Claude session is found:** the terminal's foreground pid leads to `~/.claude/sessions/<pid>.json`. This needs Claude Code in the foreground on this machine, so terminals on remote core machines report `sessionId: null`.
 
+### Gotcha: never launch Herdr from a Claude shell as is
+
+Don't start **any** Herdr window, the main one or a test one, from a Claude Code shell (its Bash tool, or a terminal a Claude started) without stripping Claude's per-session environment:
+
+```sh
+env -u CLAUDECODE -u CLAUDE_PID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ID \
+    -u CLAUDE_CODE_SESSION_ATTENDED -u CLAUDE_CODE_ENTRYPOINT \
+    -u CLAUDE_CODE_MESSAGING_SOCKET -u CLAUDE_CODE_MESSAGING_TOKEN -u HC_TERMINAL_ID -u HC_SCOPE \
+  open -g -n -a Herdr   # add --env HERDR_APP_HOME=... for a test window
+```
+
+- **Why:** the window inherits the shell's environment and hands it to every terminal it starts. A Claude started there inherits `CLAUDE_CODE_CHILD_SESSION=1` and prints "Transcript saving is off". It can't be resumed, adopted, or read by necromancy.
+- **Seen 2026-11-08:** on agents started from a test window, and on the main window after a relaunch from a Claude shell.
+- **It isn't herderp:** `herdr-app do` doesn't forward its caller's environment, so `herdr_agent{action:"start"}` and `adopt` don't cause this.
+- **Fixing it:** restart the window cleanly. Terminals it already started keep their environment, so restart those agents too.
+- **Test windows share your layout:** every window shares one herdr-core and its layout, so `tab.new` or `pane.split` sent to a test window lands in your real spaces.
+
 ## Moving a session into the Herdr app
 
 `herdr_agent{action:"adopt", target:"w8:pG"}` moves a Claude Code session out of a herdr pane:

@@ -15,6 +15,7 @@ import type { HerdrClient } from "../herdr/client.js";
 import { HerdrError } from "../herdr/types.js";
 import type { ToolResult } from "../registry.js";
 import { CoreError } from "../core/types.js";
+import { machineOf } from "../core/client.js";
 import { engineOfId, pickEngine, qualifyCore, type Engine } from "../bridge/route.js";
 import { resolveAgentTarget } from "../bridge/resolve.js";
 import { adoptAgent } from "../bridge/adopt.js";
@@ -229,6 +230,32 @@ export function coreAgentTool(bridge: BridgeDeps) {
     return { herdr: { clientFor: async () => (await herdr()).client }, core };
   }
 
+  /**
+   * hc tags every send that crosses machines (`<hc from="mac/ppid:1">`), signed or
+   * not, and a tagged /reload-plugins is only a message: on 2026-11-11 a dozen
+   * agents on ska and vana answered it instead of running it. So a command for
+   * another machine's terminal is sent from that machine (`hc exec --on`), with
+   * no caller of its own, which arrives untagged.
+   */
+  async function sendCommandOnMachine(target: string, text: string, args: AgentArgs) {
+    const machine = machineOf(target)!;
+    const bare = target.slice(machine.length + 1);
+    const waitSec = args.wait ? (args.timeoutMs ?? 180_000) / 1000 : undefined;
+    const argv = ["env", "-u", "HC_TERMINAL_ID", "-u", "HC_SCOPE", "hc", "send", "--json", ...(waitSec ? ["--wait", "--timeout", String(waitSec)] : []), bare, text];
+    const out = await core.machineExec(machine, argv, { timeoutSec: Math.min(600, Math.ceil((waitSec ?? 30) + 30)) });
+    if (out.code !== 0) {
+      throw new CoreError("send_failed", `hc send on ${machine} failed (exit ${out.code ?? "signal"}${out.timedOut ? ", timed out" : ""}): ${(out.stderr || out.stdout).trim()}`);
+    }
+    const r = (() => { try { return JSON.parse(out.stdout) as Record<string, unknown>; } catch { return {}; } })();
+    const wait = typeof r.wait === "object" && r.wait !== null ? (r.wait as Record<string, unknown>) : null;
+    return {
+      turn: typeof r.turn === "number" ? r.turn : 0,
+      started: typeof r.started === "boolean" ? r.started : null,
+      status: typeof r.status === "string" ? r.status : null,
+      wait: wait ? { terminal: target, ended: wait.ended === true, reason: String(wait.reason ?? ""), status: (wait.status as string) ?? null, turn: Number(wait.turn ?? 0), exitCode: (wait.exit_code as number) ?? null } : null,
+    };
+  }
+
   async function coreAgentAction(args: AgentArgs, target: string | undefined): Promise<ToolResult> {
     const action = args.action;
     const t = () => need(target, "target", tool, action);
@@ -259,11 +286,13 @@ export function coreAgentTool(bridge: BridgeDeps) {
         const text = need(args.text, "text", tool, action);
         const command = isComposerCommand(text);
         const from = !command && callerOf(bridge.env).engine === "core" ? (bridge.env?.HC_TERMINAL_ID ?? null) : null;
-        const sent = await core.terminalSend(t(), text, {
-          wait: args.wait,
-          timeoutMs: args.timeoutMs,
-          ...(from ? { caller: from } : {}),
-        });
+        const sent = command && machineOf(t()) !== null
+          ? await sendCommandOnMachine(t(), text, args)
+          : await core.terminalSend(t(), text, {
+              wait: args.wait,
+              timeoutMs: args.timeoutMs,
+              ...(from ? { caller: from } : {}),
+            });
         const signed = from
           ? { from }
           : command

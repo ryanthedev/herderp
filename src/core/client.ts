@@ -72,6 +72,8 @@ export interface CoreClient {
   /** Set labels; an empty value removes one. */
   terminalLabel(terminal: string, labels: Record<string, string>): Promise<CoreTerminal>;
   machineList(): Promise<CoreMachine[]>;
+  /** Run a program on another machine (`hc exec --on`), no terminal; output decoded. */
+  machineExec(machine: string, argv: string[], opts?: { timeoutSec?: number }): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>;
 
   /** The window's spaces > tabs > terminals. */
   appSpaces(): Promise<AppSpace[]>;
@@ -412,6 +414,13 @@ export function createCoreClient(deps: CoreClientDeps = {}): CoreClient {
       const raw = await rpc("machine.list", {});
       const list = isRecord(raw) && Array.isArray(raw.machines) ? raw.machines : Array.isArray(raw) ? raw : [];
       return list.filter(isRecord).map((m) => ({ name: str(m.name) ?? "", state: str(m.state) ?? "" }));
+    },
+    async machineExec(machine, argv, opts = {}) {
+      const timeoutSec = opts.timeoutSec ?? 60;
+      const raw = await rpc("machine.exec", { on: machine, argv, timeout: timeoutSec }, { timeoutMs: timeoutSec * 1000 + WAIT_SLACK_MS });
+      const r = isRecord(raw) ? raw : {};
+      const decode = (v: unknown) => (typeof v === "string" ? Buffer.from(v, "base64").toString("utf8") : "");
+      return { code: num(r.code), stdout: decode(r.stdout), stderr: decode(r.stderr), timedOut: r.timed_out === true };
     },
     async appSpaces() {
       return toAppSpaces(await runApp(["ls"]));

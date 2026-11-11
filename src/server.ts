@@ -19,7 +19,7 @@ import { createSessionLookup } from "./core/sessions.js";
 import { createCoreView } from "./core/view.js";
 
 export const SERVER_NAME = "derp";
-export const SERVER_VERSION = "0.15.1";
+export const SERVER_VERSION = "0.15.2";
 
 /** Builds a bare McpServer with no tools registered - reusable by the real entry point and by tests. */
 export function createServer(): McpServer {

@@ -353,6 +353,32 @@ describe("who is who", () => {
     expect((await s.call("herdr_agent", { action: "prompt", target: "t7", text: "see /tmp/x" })).body.from).toBe("t3s");
   });
 
+  it("a command for another machine's terminal is sent from that machine, so hc doesn't tag it", async () => {
+    const execs: Array<{ machine: string; argv: string[] }> = [];
+    const sends: string[] = [];
+    const core = {
+      terminalGet: async (t: string) => terminal({ address: t }),
+      terminalSend: async (t: string) => (sends.push(t), { turn: 1, started: true, status: "idle", wait: null }),
+      machineExec: async (machine: string, argv: string[]) => (execs.push({ machine, argv }), { code: 0, stdout: '{"started":true,"status":"done","turn":5}', stderr: "", timedOut: false }),
+    };
+    const s = setup({ env: { HC_TERMINAL_ID: "t3s" }, core: core as never });
+    const remote = await s.call("herdr_agent", { action: "prompt", target: "ska/t7", engine: "core", text: "/reload-plugins" });
+    expect(remote.body.sent).toMatchObject({ started: true, turn: 5 });
+    expect(execs).toEqual([{ machine: "ska", argv: ["env", "-u", "HC_TERMINAL_ID", "-u", "HC_SCOPE", "hc", "send", "--json", "t7", "/reload-plugins"] }]);
+    expect(sends).toEqual([]);
+    await s.call("herdr_agent", { action: "prompt", target: "ska/t7", engine: "core", text: "plain words" });
+    await s.call("herdr_agent", { action: "prompt", target: "t7", engine: "core", text: "/reload-plugins" });
+    expect(sends).toEqual(["ska/t7", "t7"]);
+    expect(execs.length).toBe(1);
+  });
+
+  it("a failed remote command send is an error, not a quiet success", async () => {
+    const core = { machineExec: async () => ({ code: 1, stdout: "", stderr: "no terminal t7", timedOut: false }) };
+    const { isError, text } = await setup({ core: core as never }).call("herdr_agent", { action: "prompt", target: "ska/t7", engine: "core", text: "/compact" });
+    expect(isError).toBe(true);
+    expect(text).toContain("no terminal t7");
+  });
+
   it("creating in herdr from outside herdr warns that the Herdr app won't show it", async () => {
     const herdr = { workspaceCreate: async () => ({ workspace: { id: "w2" }, rootPane: { id: "w2:p1" } }), agentStart: async () => undefined };
     const fromApp = await setup({ env: { HC_TERMINAL_ID: "t1" }, herdr: herdr as never }).call("herdr_agent", { action: "start", kind: "claude", name: "x", paneId: "w1:p1" });

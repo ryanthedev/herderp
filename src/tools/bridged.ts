@@ -101,14 +101,31 @@ function need<T>(value: T | undefined, field: string, tool: string, action: stri
   return value;
 }
 
-/** `until` on core: hc waits until the agent is not working - one rule, no state list. */
+/** `until` on core's prompt: hc waits until the agent is not working - one rule, no state list. */
 function rejectUntil(until: unknown, tool: string, action: string): void {
   if (until !== undefined) {
     throw new CoreError(
       "unsupported_on_core",
-      `${tool}{action:"${action}"}: a Herdr app agent waits until it stops working (any word but working, or it exits) - drop "until"`,
+      `${tool}{action:"${action}"}: a Herdr app agent waits until it stops working (any word but working, or it exits) - drop "until", then herdr_agent{action:'wait', until} to check the state it stopped in`,
     );
   }
+}
+
+/** The states a core wait can end in. `working` and `unknown` can't be waited for: hc's wait ends when it is NOT working. */
+const CORE_WAITABLE: ReadonlySet<string> = new Set(["idle", "done", "blocked"]);
+
+/** `until` on core's wait, as a list; states hc can't wait for are refused by name. */
+function coreUntil(until: unknown, tool: string): string[] | null {
+  if (until === undefined) return null;
+  const wanted = (Array.isArray(until) ? until : [until]).filter((u): u is string => typeof u === "string");
+  const refused = wanted.filter((u) => !CORE_WAITABLE.has(u));
+  if (refused.length > 0) {
+    throw new CoreError(
+      "unsupported_on_core",
+      `${tool}{action:"wait"}: a Herdr app agent can be waited on until it stops working, so until takes idle, done or blocked - not ${refused.map((u) => `"${u}"`).join(", ")}`,
+    );
+  }
+  return wanted;
 }
 
 // --- herdr_agent ------------------------------------------------------------
@@ -325,11 +342,24 @@ export function coreAgentTool(bridge: BridgeDeps) {
         await core.appDo("agent.focus", { terminal: t() });
         return ok("agent shown in the Herdr app");
       case "wait": {
-        rejectUntil(args.until, tool, action);
+        // hc has one wait: until it is not working. `until` is answered by comparing the state it stopped in.
+        const until = coreUntil(args.until, tool);
         const waited = await core.terminalWait(t(), { timeoutMs: args.timeoutMs });
+        if (until !== null && waited.ended) {
+          const matched = waited.status !== null && until.includes(waited.status);
+          return {
+            engine: "core",
+            wait: waited,
+            matched,
+            hint: matched
+              ? `it stopped as ${waited.status}; herdr_agent{action:'read'} to see what it produced`
+              : `it stopped as ${waited.status ?? waited.reason}, not ${until.join("/")} - herdr_agent{action:'read'} to see why`,
+          };
+        }
         return {
           engine: "core",
           wait: waited,
+          ...(until !== null ? { matched: false } : {}),
           hint: waited.ended
             ? "it stopped; herdr_agent{action:'read'} to see what it produced"
             : "still working at the timeout (a check-in, not a failure) - wait again",

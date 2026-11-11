@@ -340,6 +340,19 @@ describe("who is who", () => {
     expect(unsigned.body.fromNote).toContain("say who you are");
   });
 
+  it("a slash command or ! line goes unsigned, so it still runs as a command", async () => {
+    const sends: Array<Record<string, unknown> | undefined> = [];
+    const core = { terminalSend: async (_t: string, _x: string, o?: Record<string, unknown>) => (sends.push(o), { turn: 1, started: true, status: "idle", wait: null }) };
+    const s = setup({ env: { HC_TERMINAL_ID: "t3s" }, core: core as never });
+    for (const text of ["/reload-plugins", "  /compact", "!git status"]) {
+      const { body } = await s.call("herdr_agent", { action: "prompt", target: "t7", text });
+      expect(body.from).toBeNull();
+      expect(body.fromNote).toContain("runs as a command");
+    }
+    expect(sends.every((o) => o?.caller === undefined)).toBe(true);
+    expect((await s.call("herdr_agent", { action: "prompt", target: "t7", text: "see /tmp/x" })).body.from).toBe("t3s");
+  });
+
   it("creating in herdr from outside herdr warns that the Herdr app won't show it", async () => {
     const herdr = { workspaceCreate: async () => ({ workspace: { id: "w2" }, rootPane: { id: "w2:p1" } }), agentStart: async () => undefined };
     const fromApp = await setup({ env: { HC_TERMINAL_ID: "t1" }, herdr: herdr as never }).call("herdr_agent", { action: "start", kind: "claude", name: "x", paneId: "w1:p1" });

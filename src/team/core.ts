@@ -420,8 +420,11 @@ export function createTeam(deps: TeamDeps): Team {
       requireLocal(old.address, action);
       if (old.spaceId === null) throw teamError("not_a_member", `${old.address} is in no Herdr app space (no ${LABEL_SPACE} label), so it is on no team`);
       if (old.labels[LABEL_RETIRED]) throw teamError("already_retired", `${old.address} already handed off to ${old.labels[LABEL_RETIRED]}`);
-      const line = stripEnvWrapper(old.argv);
-      if (!isClaudeTerminal({ ...old, foreground: { pid: 0, argv: line, cwd: "" } })) {
+      // A session typed into a tab's shell was launched as that shell; what runs now is the line to copy.
+      const isClaudeLine = (argv: string[]) => isClaudeTerminal({ ...old, foreground: { pid: 0, argv, cwd: "" } });
+      let line = stripEnvWrapper(old.argv);
+      if (!isClaudeLine(line) && old.foreground && isClaudeLine(old.foreground.argv)) line = old.foreground.argv;
+      if (!isClaudeLine(line)) {
         throw teamError("unsupported_agent", `herdr_team{action:"recycle"} only knows Claude Code launch lines, and ${old.address} was started as "${line[0] ?? "?"}" - start its successor with action:'start'`);
       }
       const handoff = isAbsolute(args.handoff) ? args.handoff : join(old.cwd, args.handoff);

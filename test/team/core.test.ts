@@ -298,6 +298,14 @@ describe("recycle", () => {
     expect(s.calls).toContain(`label t2 {"plenary.reports-to":"t900"}`);
   });
 
+  it("a session typed into a tab's shell is recycled from the line that runs now", async () => {
+    const world = plenary();
+    Object.assign(world.terminals[1]!, { argv: ["/bin/zsh", "-l"], foreground: { pid: 5, argv: ["claude", "--plugin-dir", "/p/x", "old prompt"], cwd: "/repo" } });
+    const s = setup(world, { files: ["/repo/h.md"] });
+    await s.team.recycle({ target: "t2", handoff: "h.md" });
+    expect(JSON.parse(s.calls[0]!.slice(4)).argv.slice(-4)).toEqual(["claude", "--plugin-dir", "/p/x", "Read h.md and continue as manager."]);
+  });
+
   it("touches nothing when the hand-off file is missing or the successor does not start", async () => {
     const missing = setup(plenary());
     expect((await failure(missing.team.recycle({ target: "t2", handoff: "nope.md" }))).code).toBe("no_handoff");
@@ -321,7 +329,7 @@ describe("recycle", () => {
 
   it("refuses an already-retired member, a remote one, a non-Claude one, and one in no space", async () => {
     const world = plenary();
-    world.terminals.push(terminal("ska/t9", { machine: "ska" }), terminal("t10", { argv: ["codex", "go"] }), terminal("t11", { labels: { "herdr.space": "" } }));
+    world.terminals.push(terminal("ska/t9", { machine: "ska" }), terminal("t10", { argv: ["codex", "go"], foreground: { pid: 9, argv: ["codex", "go"], cwd: "/repo" } }), terminal("t11", { labels: { "herdr.space": "" } }));
     const s = setup(world, { files: ["/repo/h.md"] });
     expect((await failure(s.team.recycle({ target: "t4", handoff: "h.md" }))).code).toBe("already_retired");
     expect((await failure(s.team.recycle({ target: "ska/t9", handoff: "h.md" }))).code).toBe("unsupported_remote");

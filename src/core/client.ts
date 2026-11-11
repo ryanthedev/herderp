@@ -71,6 +71,16 @@ export interface CoreClient {
   terminalInterrupt(terminal: string): Promise<CoreInterruptResult>;
   /** Set labels; an empty value removes one. */
   terminalLabel(terminal: string, labels: Record<string, string>): Promise<CoreTerminal>;
+  /**
+   * Start a program in a new terminal and come back at once (`hc run --bg`).
+   * Always `no_parent`: Herdr treats a parented terminal as a pane-less helper
+   * (ROLES.md rule 5). `env` overrides the core's environment for it.
+   */
+  terminalRun(opts: { argv: string[]; cwd: string; labels?: Record<string, string>; env?: Record<string, string>; name?: string }): Promise<CoreTerminal>;
+  /** End its program (hangup, then escalate); returns the terminal as observed after. */
+  terminalKill(terminal: string): Promise<CoreTerminal>;
+  /** Remove a finished terminal. */
+  terminalRm(terminal: string): Promise<void>;
   machineList(): Promise<CoreMachine[]>;
   /** Run a program on another machine (`hc exec --on`), no terminal; output decoded. */
   machineExec(machine: string, argv: string[], opts?: { timeoutSec?: number }): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>;
@@ -267,6 +277,8 @@ export function toCoreTerminal(raw: unknown): CoreTerminal {
     turn: num(raw.turn) ?? 0,
     cwd: foreground?.cwd || (str(raw.cwd) ?? ""),
     foreground,
+    argv: Array.isArray(raw.argv) ? raw.argv.filter((a): a is string => typeof a === "string") : [],
+    createdMs: num(raw.created_ms),
     labels,
     parent: str(raw.parent),
     spaceId: labels["herdr.space"] ?? null,
@@ -409,6 +421,19 @@ export function createCoreClient(deps: CoreClientDeps = {}): CoreClient {
     },
     async terminalLabel(terminal, labels) {
       return toCoreTerminal(await rpc("terminal.label", { terminal, labels }));
+    },
+    async terminalRun(opts) {
+      const params: Record<string, unknown> = { argv: opts.argv, cwd: opts.cwd, labels: opts.labels ?? {}, no_parent: true };
+      if (opts.env && Object.keys(opts.env).length > 0) params.env = opts.env;
+      if (opts.name) params.name = opts.name;
+      return toCoreTerminal(await rpc("terminal.run", params));
+    },
+    async terminalKill(terminal) {
+      // hangup -> terminate -> kill can take a few seconds on a busy agent.
+      return toCoreTerminal(await rpc("terminal.kill", { terminal }, { timeoutMs: 60_000 }));
+    },
+    async terminalRm(terminal) {
+      await rpc("terminal.rm", { terminal });
     },
     async machineList() {
       const raw = await rpc("machine.list", {});

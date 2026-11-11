@@ -33,7 +33,7 @@ function terminal(over: Partial<CoreTerminal> = {}): CoreTerminal {
     turn: 0,
     cwd: "/x",
     foreground: { pid: 3096, argv: ["claude"], cwd: "/x" },
-    labels: {},
+    labels: {}, argv: [], createdMs: null,
     parent: null,
     spaceId: null,
     tabId: null,

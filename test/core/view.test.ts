@@ -19,7 +19,7 @@ const CWD = "/repo/api";
 function terminal(over: Partial<CoreTerminal> = {}): CoreTerminal {
   return {
     address: "t7", name: null, state: "live", app: "claude-code", status: "done", blockedKind: null, message: "",
-    title: "", turn: 1, cwd: CWD, foreground: { pid: 7, argv: ["claude"], cwd: CWD }, labels: {}, parent: null,
+    title: "", turn: 1, cwd: CWD, foreground: { pid: 7, argv: ["claude"], cwd: CWD }, labels: {}, argv: [], createdMs: null, parent: null,
     spaceId: "sp1", tabId: "tb1", where: "api / 1", machine: null, ...over,
   };
 }

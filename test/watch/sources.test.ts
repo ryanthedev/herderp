@@ -96,7 +96,7 @@ describe("subscribeCoreEvents", () => {
 function terminal(over: Partial<CoreTerminal> = {}): CoreTerminal {
   return {
     address: "t7", name: "review", state: "live", app: "claude-code", status: "working", blockedKind: null, message: "",
-    title: "", turn: 0, cwd: "/b", foreground: { pid: 7, argv: ["claude"], cwd: "/b" }, labels: {}, parent: null,
+    title: "", turn: 0, cwd: "/b", foreground: { pid: 7, argv: ["claude"], cwd: "/b" }, labels: {}, argv: [], createdMs: null, parent: null,
     spaceId: null, tabId: null, where: null, machine: null, ...over,
   };
 }

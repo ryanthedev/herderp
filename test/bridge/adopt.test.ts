@@ -20,7 +20,7 @@ function agent(status: AgentStatus, over: Partial<Agent> = {}): Agent {
 function coreTerminal(over: Partial<CoreTerminal> = {}): CoreTerminal {
   return {
     address: "t4c", name: null, state: "live", app: "claude-code", status: "idle", blockedKind: null, message: "",
-    title: "", turn: 0, cwd: "/repo", foreground: { pid: 1, argv: ["claude"], cwd: "/repo" }, labels: {},
+    title: "", turn: 0, cwd: "/repo", foreground: { pid: 1, argv: ["claude"], cwd: "/repo" }, labels: {}, argv: [], createdMs: null,
     parent: null, spaceId: "sp1", tabId: "tb1", where: null, machine: null, ...over,
   };
 }

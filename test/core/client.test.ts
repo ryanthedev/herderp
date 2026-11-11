@@ -145,6 +145,8 @@ describe("toCoreTerminal", () => {
       turn: 4,
       cwd: "/Users/r/repos/herderp",
       foreground: { pid: 3096, argv: ["claude", "--settings", "x.json"], cwd: "/Users/r/repos/herderp" },
+      argv: ["/bin/zsh", "-l"],
+      createdMs: 1794166008507,
       labels: RAW_TERMINAL.labels,
       parent: null,
       spaceId: "sp6d1e",
@@ -184,6 +186,24 @@ describe("createCoreClient", () => {
       },
     };
   };
+
+  it("terminalRun starts an unparented terminal with its labels, and sends env and name only when given", async () => {
+    const { rpc, calls } = rpcOf({ "terminal.run": RAW_TERMINAL });
+    const client = createCoreClient({ rpc });
+    const started = await client.terminalRun({ argv: ["claude", "go"], cwd: "/w", labels: { job: "p1" } });
+    expect(started.address).toBe("t3s");
+    expect(calls[0]!.slice(0, 2)).toEqual(["terminal.run", { argv: ["claude", "go"], cwd: "/w", labels: { job: "p1" }, no_parent: true }]);
+    await client.terminalRun({ argv: ["claude"], cwd: "/w", env: { A: "1" }, name: "lead" });
+    expect(calls[1]![1]).toEqual({ argv: ["claude"], cwd: "/w", labels: {}, no_parent: true, env: { A: "1" }, name: "lead" });
+  });
+
+  it("terminalKill and terminalRm name the terminal", async () => {
+    const { rpc, calls } = rpcOf({ "terminal.kill": { ...RAW_TERMINAL, state: "finished" }, "terminal.rm": {} });
+    const client = createCoreClient({ rpc });
+    expect((await client.terminalKill("t3s")).state).toBe("finished");
+    await client.terminalRm("t3s");
+    expect(calls.map((c) => [c[0], c[1]])).toEqual([["terminal.kill", { terminal: "t3s" }], ["terminal.rm", { terminal: "t3s" }]]);
+  });
 
   it("lists terminals and machines", async () => {
     const { rpc } = rpcOf({ "terminal.list": { terminals: [RAW_TERMINAL], machines: [{ name: "ska", state: "connected", host: "x" }], hidden_finished: 3 } });

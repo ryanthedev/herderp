@@ -286,7 +286,10 @@ export function coreAgentTool(bridge: BridgeDeps) {
         const text = need(args.text, "text", tool, action);
         const command = isComposerCommand(text);
         const from = !command && callerOf(bridge.env).engine === "core" ? (bridge.env?.HC_TERMINAL_ID ?? null) : null;
-        const sent = command && machineOf(t()) !== null
+        // Only `/` commands take the untagged cross-machine path. A `!` line would run
+        // a shell on the other machine with hc's provenance tag stripped, so it keeps
+        // the tag (and arrives there as a message the agent can weigh, not a command).
+        const sent = command && text.trimStart().startsWith("/") && machineOf(t()) !== null
           ? await sendCommandOnMachine(t(), text, args)
           : await core.terminalSend(t(), text, {
               wait: args.wait,

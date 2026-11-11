@@ -19,6 +19,8 @@ import { engineOfId, pickEngine, qualifyCore, type Engine } from "../bridge/rout
 import { resolveAgentTarget } from "../bridge/resolve.js";
 import { adoptAgent } from "../bridge/adopt.js";
 import { isNotInstalled } from "../bridge/absent.js";
+import { cleanLaunch } from "../bridge/cleanenv.js";
+import { callerOf, isCaller, markCaller, youSummary } from "../bridge/self.js";
 import { planBridgedWatch } from "../watch/command.js";
 import type { BridgeDeps } from "./curated.js";
 import {
@@ -158,14 +160,17 @@ export function coreAgentTool(bridge: BridgeDeps) {
   const tool = "herdr_agent";
   return async (route: Exclude<Route, "herdr">, args: AgentArgs, herdr: HerdrThunk<AgentArgs>): Promise<ToolResult> => {
     if (args.action === "list") {
+      const caller = callerOf(bridge.env);
       if (route === "core") {
-        return { agents: await coreAgents(core, sessions, args.host), hint: LIST_HINT };
+        const agents = markCaller(await coreAgents(core, sessions, args.host), caller, args.host);
+        return { you: youSummary(agents, caller, args.host), agents, hint: LIST_HINT };
       }
       const { rows, degraded } = await both(
         async () => tagged(await (await herdr()).client.agentList(), (a) => ({ target: a.paneId })),
         () => coreAgents(core, sessions, args.host),
       );
-      return withDegraded({ agents: rows, hint: LIST_HINT }, degraded);
+      const agents = markCaller(rows as Array<{ engine?: string; target?: string; machine?: string | null }>, caller, args.host);
+      return withDegraded({ you: youSummary(agents, caller, args.host), agents, hint: LIST_HINT }, degraded);
     }
     if (args.action === "watch") {
       const targets = [...(args.targets ?? []), ...(args.target ? [args.target] : [])];
@@ -228,8 +233,10 @@ export function coreAgentTool(bridge: BridgeDeps) {
     const action = args.action;
     const t = () => need(target, "target", tool, action);
     switch (action) {
-      case "get":
-        return { agent: await coreAgentRow(await core.terminalGet(t()), sessions) };
+      case "get": {
+        const [agent] = markCaller([await coreAgentRow(await core.terminalGet(t()), sessions)], callerOf(bridge.env));
+        return { agent };
+      }
       case "read": {
         rejectFields(args, [["source", isSet], ["format", isSet], ["ansi", isSet]], tool, action);
         const read = await core.terminalRead(t(), { lines: args.lines });
@@ -244,23 +251,30 @@ export function coreAgentTool(bridge: BridgeDeps) {
       }
       case "prompt": {
         rejectUntil(args.until, tool, action);
+        // Name the sender, so the agent reads <hc from="t3s">...</hc> and knows who is
+        // talking to it. hc only tags a send whose caller is one of its terminals.
+        const from = callerOf(bridge.env).engine === "core" ? (bridge.env?.HC_TERMINAL_ID ?? null) : null;
         const sent = await core.terminalSend(t(), need(args.text, "text", tool, action), {
           wait: args.wait,
           timeoutMs: args.timeoutMs,
+          ...(from ? { caller: from } : {}),
         });
+        const signed = from
+          ? { from }
+          : { from: null, fromNote: "sent unsigned: this session is not a Herdr app terminal, so the agent sees no sender - say who you are in the text" };
         if (args.wait) {
           return ok(
             sent.wait?.ended === false
               ? "prompt submitted; still working at the timeout - herdr_agent{action:'wait'} again"
               : "prompt submitted and the agent stopped; herdr_agent{action:'read'} to see what it produced",
-            { sent },
+            { sent, ...signed },
           );
         }
         return ok(
           sent.started === false
             ? "prompt submitted but it did not start working - herdr_agent{action:'read'} before resending (it may still have arrived)"
             : "prompt submitted; herdr_agent{action:'wait'} then {action:'read'} to collect the answer",
-          { sent },
+          { sent, ...signed },
         );
       }
       case "send_keys": {
@@ -289,7 +303,8 @@ export function coreAgentTool(bridge: BridgeDeps) {
       case "start": {
         const kind = need(args.kind, "kind", tool, "start");
         rejectFields(args, [["paneId", isSet], ["timeoutMs", isSet]], tool, action);
-        const argv = [kind, ...(args.argv ?? [])];
+        // Strip another session's markers: a polluted core would otherwise start a Claude that saves no transcript.
+        const argv = cleanLaunch([kind, ...(args.argv ?? [])]);
         // A space means a new tab there (terminal.open only opens beside the focused pane).
         if (args.workspaceId && args.place && args.place !== "tab") {
           throw new CoreError("unsupported_on_core", `${tool}{action:"start"}: with workspaceId the Herdr app opens a new tab - drop place, or drop workspaceId to split beside the focused pane`);
@@ -323,6 +338,29 @@ export function coreAgentTool(bridge: BridgeDeps) {
         throw unsupported(tool, action, "see this tool's description");
     }
   }
+}
+
+/**
+ * Marks the caller in a herdr agent answer (list or get), which herdr itself
+ * never does. Core answers are marked where they are built; a result that
+ * already carries `you` is left alone.
+ */
+export function markHerdrAgents(result: ToolResult, args: { action: string; host?: string }, env?: NodeJS.ProcessEnv): ToolResult {
+  if (typeof result === "string" || "you" in result) return result;
+  const caller = callerOf(env);
+  if (args.action === "list" && Array.isArray(result.agents)) {
+    const agents = (result.agents as Array<Record<string, unknown>>).map((row) =>
+      isCaller({ engine: "herdr", target: row.paneId as string | undefined }, caller, args.host) ? { ...row, you: true as const } : row,
+    );
+    const rows = agents.map((row) => ({ ...row, target: row.paneId as string | undefined, engine: "herdr" }));
+    return { you: youSummary(rows, caller, args.host), ...result, agents };
+  }
+  if (args.action === "get" && typeof result.agent === "object" && result.agent !== null) {
+    const agent = result.agent as Record<string, unknown>;
+    const mine = isCaller({ engine: "herdr", target: agent.paneId as string | undefined }, caller, args.host);
+    return mine ? { ...result, agent: { ...agent, you: true } } : result;
+  }
+  return result;
 }
 
 /** Actions that only look: a bare name found while the other engine is down may still answer these. */

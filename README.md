@@ -45,12 +45,16 @@ The Herdr desktop app doesn't run its terminals on the `herdr` server. They live
 - **What differs on core:**
   - **`read`** takes `lines`: 0, the default, reads the visible screen, which is fast.
   - **`prompt` and `wait`** wait until the agent stops working, so `until` is rejected.
-  - **`start`** opens a new terminal in the window (`kind`, plus optional `argv`, `cwd`, `place`, `name`).
+  - **`start`** opens a new terminal in the window (`kind`, plus optional `argv`, `cwd`, `place`, `name`). Agents (and `adopt`) launch through `env -u` for Claude's per-session markers (`CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_PID`, `CLAUDECODE`, …). A core installed or started from a Claude shell otherwise hands them to every new terminal, and the Claude started there saves no transcript.
   - **`herdr_pane` `focus`** works by pane id, and `run` types into the pane's terminal.
 - **herdr only:** `rename` and `explain` (agent), `move` and pair `swap` (pane), and worktrees. On core these fail with `[unsupported_on_core]` and say what to use instead.
 - **Necromancy** marks sessions live in either engine and resolves handles such as `upublish:1` against herdr workspaces and Herdr app spaces alike.
   - **Same name in both engines** (the normal state while moving over): if only one engine's tab holds a live Claude, the handle resolves there. Otherwise the result is `ambiguous_workspace`, with each candidate tagged `engine`.
   - **The current space** defaults to `HERDR_WORKSPACE_ID`, else the Herdr app space of `HC_TERMINAL_ID`.
+- **Who is who.** Several agents in one space lose track of each other easily, so the tools say who everyone is:
+  - **You:** `herdr_agent` `list` marks the caller's own row `you: true`, and a top-level `you` gives its engine, target and place. If the caller runs outside both engines, `you` says so, and no row is marked. `get` marks the caller too. The caller is found from `HERDR_PANE_ID`, else `HC_TERMINAL_ID`.
+  - **Senders:** a core `prompt` from a Herdr app terminal passes that terminal to hc as the caller. The agent then reads `<hc from="t3s">…</hc>` and knows who sent it. The result's `from` names the sender. When it is `null` (the caller isn't a Herdr app terminal), the message arrives unsigned, so say who you are in the text.
+  - **Invisible agents:** anything created in herdr by a caller that isn't in herdr, or on a remote host, comes back with a `notice`. The Herdr desktop app shows only herdr-core, so the user won't see it there.
 - **How a core terminal's Claude session is found:** the terminal's foreground pid leads to `~/.claude/sessions/<pid>.json`. This needs Claude Code in the foreground on this machine, so terminals on remote core machines report `sessionId: null`.
 
 ## Moving a session into the Herdr app

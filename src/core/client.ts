@@ -61,7 +61,8 @@ export interface CoreClient {
   /** `lines` of history above the screen; 0 (default) is the screen only - fast. */
   terminalRead(terminal: string, opts?: { lines?: number }): Promise<CoreReadResult>;
   /** Paste text and press Enter once nobody has typed for ~3 s. */
-  terminalSend(terminal: string, text: string, opts?: { wait?: boolean; timeoutMs?: number; force?: boolean }): Promise<CoreSendResult>;
+  /** `caller`: the sender's own terminal (`t3s`); hc then shows the text as `<hc from="t3s">`. */
+  terminalSend(terminal: string, text: string, opts?: { wait?: boolean; timeoutMs?: number; force?: boolean; caller?: string }): Promise<CoreSendResult>;
   /** Press named keys: enter, esc, tab, up, ctrl+c, ... */
   terminalKeys(terminal: string, keys: string[]): Promise<{ turn: number; status: string | null }>;
   /** Until it is not working (or exits). Times out as a check-in (`ended: false`). */
@@ -373,6 +374,7 @@ export function createCoreClient(deps: CoreClientDeps = {}): CoreClient {
     async terminalSend(terminal, text, opts = {}) {
       const params: Record<string, unknown> = { terminal, text };
       if (opts.force) params.force = true;
+      if (opts.caller) params.caller = opts.caller;
       let processMs = DEFAULT_RPC_TIMEOUT_MS;
       if (opts.wait) {
         const budget = waitBudget(opts.timeoutMs);

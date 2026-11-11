@@ -24,6 +24,8 @@ export const CONTEXT_LIMIT_PCT = 60;
 export const DEFAULT_STALL_MS = 600_000;
 export const LAST_MESSAGE_CHARS = 300;
 const DETAIL_LINES = 12;
+/** How far up from the bottom a live choice list can start. */
+const PROMPT_TAIL_LINES = 10;
 
 const LEGACY_SUFFIX = ".reports-to";
 
@@ -52,9 +54,17 @@ export function jobOf(labels: Record<string, string>): string | null {
   return null;
 }
 
-/** True when the labels say a team started it: the bar cleanup holds a terminal to. */
-export function hasTeamLabel(labels: Record<string, string>): boolean {
-  return reportsToKey(labels) !== null || Boolean(labels[LABEL_JOB]) || Boolean(labels[LABEL_RETIRED]);
+/**
+ * True when the labels put this terminal on a team: a role (other than the
+ * infrastructure `proxy`), a job, or a reports-to. This is the bar recycle
+ * and cleanup hold a terminal to. `retired` is deliberately not on the list:
+ * it says what happened to a member, it does not make one - a bare
+ * `retired` label on a person's shell once got that shell closed (verifier,
+ * 2026-11-11).
+ */
+export function isTeamMember(labels: Record<string, string>): boolean {
+  const role = labels[LABEL_ROLE];
+  return reportsToKey(labels) !== null || Boolean(labels[LABEL_JOB]) || (Boolean(role) && role !== "proxy");
 }
 
 // --- screen reading (heuristics) ---------------------------------------------
@@ -66,7 +76,7 @@ export function hasTeamLabel(labels: Record<string, string>): boolean {
  */
 export function parseContextPct(screen: string): number | null {
   const lines = screen.split("\n");
-  for (let i = lines.length - 1, seen = 0; i >= 0 && seen < 8; i--) {
+  for (let i = lines.length - 1, seen = 0; i >= 0 && seen < FOOTER_LINES; i--) {
     const line = lines[i]!.trimEnd();
     if (line.trim() === "") continue;
     seen++;
@@ -78,6 +88,9 @@ export function parseContextPct(screen: string): number | null {
   }
   return null;
 }
+
+/** The footer is the last thing on a Claude Code screen; looking further up reads the agent's own output. */
+const FOOTER_LINES = 4;
 
 const RULE_RE = /^[─━]{20,}\s*$/;
 
@@ -118,12 +131,16 @@ export function parseDraft(screen: string): string | null {
  */
 export function parseBlockedPrompt(screen: string): { permission: boolean; detail: string } {
   const lines = screen.split("\n").map((line) => line.trimEnd());
+  const optionOne = /^\s*(?:[❯>]\s*)?1\.\s/;
   let yes = -1;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (/^\s*(?:[❯>]\s*)?1\.\s+Yes\b/.test(lines[i]!)) {
-      yes = i;
-      break;
-    }
+  // The live choice list is the last one on screen and sits near the bottom;
+  // an older "1. Yes" further up, or one followed by another list, is history.
+  for (let i = lines.length - 1, seen = 0; i >= 0 && seen < PROMPT_TAIL_LINES; i--) {
+    if (lines[i]!.trim() === "") continue;
+    seen++;
+    if (!optionOne.test(lines[i]!)) continue;
+    if (/^\s*(?:[❯>]\s*)?1\.\s+Yes\b/.test(lines[i]!)) yes = i;
+    break;
   }
   const end = yes === -1 ? lines.length : yes;
   const picked: string[] = [];
@@ -134,22 +151,26 @@ export function parseBlockedPrompt(screen: string): { permission: boolean; detai
   return { permission: yes !== -1, detail: picked.join("\n") };
 }
 
-/** Heuristic: the reply's last line is a question. */
+/** Heuristic: one of the reply's last two lines asks something (`...? (y/n)` and a sign-off line after it count). */
 export function endsWithQuestion(text: string | null): boolean {
   if (!text) return false;
-  const last = text.trim().split("\n").pop() ?? "";
-  return /\?["')\]*_`]*\s*$/.test(last);
+  const tail = text
+    .trim()
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .slice(-2);
+  return tail.some((line) => /\?\s*(?:\([^)]{0,20}\))?["')\]*_`]*\s*$/.test(line));
 }
 
 // --- members, flags, tree ----------------------------------------------------
 
-export type Flag = "blocked" | "permission" | "question" | "draft" | "stalled" | "context" | "orphan" | "retired";
+export type Flag = "blocked" | "permission" | "question" | "draft" | "unstarted" | "maybe-draft" | "stalled" | "context" | "orphan" | "retired";
 
 /** Worst first: the order of the "needs attention" view. */
-const FLAG_ORDER: readonly Flag[] = ["permission", "blocked", "question", "draft", "stalled", "context", "orphan", "retired"];
+const FLAG_ORDER: readonly Flag[] = ["permission", "blocked", "question", "draft", "unstarted", "stalled", "context", "maybe-draft", "orphan", "retired"];
 
 /** Flags that mean someone should look now; `retired` and `orphan` alone are bookkeeping. */
-const ATTENTION_FLAGS: ReadonlySet<Flag> = new Set(["permission", "blocked", "question", "draft", "stalled", "context"]);
+const ATTENTION_FLAGS: ReadonlySet<Flag> = new Set(["permission", "blocked", "question", "draft", "unstarted", "stalled", "context", "maybe-draft"]);
 
 /** One member's facts as core.ts gathered them. */
 export interface MemberFacts {
@@ -158,6 +179,8 @@ export interface MemberFacts {
   status: string | null;
   blockedKind: string | null;
   message: string;
+  /** Turns it has finished; 0 with status idle means its first prompt never ran. */
+  turn: number;
   createdMs: number | null;
   tabId: string | null;
   tabLabel: string | null;
@@ -194,7 +217,10 @@ export interface Attention {
   tabLabel: string | null;
   flags: Flag[];
   why: string;
+  /** The text to act on: the prompt on screen, the question, or the typed text. */
   detail: string | null;
+  /** The agent's own status note; for a permission prompt it carries the whole command. */
+  message: string;
 }
 
 export interface Roster {
@@ -211,6 +237,8 @@ export interface RosterOptions {
   /** Every live terminal's address, on any space: tells "outside" from "gone". */
   live: ReadonlySet<string>;
   you?: string | null;
+  /** Also list stopped members with composer text as `maybe-draft` (it may be a suggestion). */
+  drafts?: boolean;
 }
 
 function truncate(text: string, max: number): string {
@@ -250,6 +278,14 @@ function describe(facts: MemberFacts, options: RosterOptions): { member: Member;
     flags.add("draft");
     why.push("text typed in its composer while it works, not sent");
     detail ??= truncate(composer, LAST_MESSAGE_CHARS);
+  } else if (composer !== null && options.drafts) {
+    flags.add("maybe-draft");
+    why.push("text in its composer - typed and never sent, or Claude Code's own greyed suggestion (screen text can't tell)");
+    detail ??= truncate(composer, LAST_MESSAGE_CHARS);
+  }
+  if (facts.status === "idle" && facts.turn === 0) {
+    flags.add("unstarted");
+    why.push("idle and has never run a turn - its first prompt did not arrive");
   }
   if (facts.status === "working" && facts.activityAt !== null && options.now - facts.activityAt > stallMs) {
     flags.add("stalled");
@@ -284,7 +320,7 @@ function describe(facts: MemberFacts, options: RosterOptions): { member: Member;
   const needsLook = ordered.some((flag) => ATTENTION_FLAGS.has(flag));
   return {
     member,
-    attention: needsLook ? { target: facts.target, tabLabel: facts.tabLabel, flags: ordered, why: why.join("; "), detail } : null,
+    attention: needsLook ? { target: facts.target, tabLabel: facts.tabLabel, flags: ordered, why: why.join("; "), detail, message: facts.message } : null,
   };
 }
 
@@ -401,6 +437,17 @@ export function stripEnvWrapper(argv: readonly string[]): string[] {
     else break;
   }
   return line.slice(i);
+}
+
+/**
+ * The prompt goes after `--` for Claude Code: `--add-dir` and `--mcp-config`
+ * take several values and would swallow a prompt placed right after them
+ * (verifier, 2026-11-11: the member started with no task), and a prompt
+ * starting with `-` would be read as a flag. Other agents' CLIs are not
+ * known to take `--`, so their line is left as it is.
+ */
+export function withPrompt(line: readonly string[], prompt: string, isClaude: boolean): string[] {
+  return isClaude ? [...line, "--", prompt] : [...line, prompt];
 }
 
 /** The plugin set of a Claude launch line: its `--settings` and `--plugin-dir` flags, in order. */

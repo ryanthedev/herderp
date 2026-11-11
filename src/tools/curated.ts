@@ -48,7 +48,7 @@ import type { AdoptDeps } from "../bridge/adopt.js";
 const AGENT_WAIT_STATUS = z.enum(["idle", "working", "blocked", "done", "unknown"]);
 /** `--kind` on `agent start`, verbatim from herdr 0.7.5's help. Kept as a
  * closed enum because herdr rejects anything else at argument parsing. */
-const AGENT_KIND = z.enum([
+export const AGENT_KIND = z.enum([
   "pi", "claude", "codex", "gemini", "cursor", "devin", "agy", "cline",
   "omp", "mastracode", "opencode", "copilot", "kimi", "kiro", "droid",
   "amp", "grok", "hermes", "kilo", "qodercli", "maki",

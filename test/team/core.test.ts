@@ -125,7 +125,7 @@ describe("start", () => {
     const run = JSON.parse(s.calls[0]!.slice(4));
     expect(run.argv.slice(0, 1 + CLAUDE_SESSION_MARKERS.length * 2)).toEqual(["env", ...CLAUDE_SESSION_MARKERS.flatMap((m) => ["-u", m])]);
     expect(run.argv.slice(1 + CLAUDE_SESSION_MARKERS.length * 2)).toEqual([
-      "claude", "--settings", "/s.json", "--plugin-dir", "/p/engram", "--plugin-dir", "/p/herderp", "Read docs/briefs/p2.md and do it.",
+      "claude", "--settings", "/s.json", "--plugin-dir", "/p/engram", "--plugin-dir", "/p/herderp", "--", "Read docs/briefs/p2.md and do it.",
     ]);
     expect(run.cwd).toBe("/repo");
     expect(run.labels).toEqual({ "herdr.space": SPACE, role: "worker", job: "p2", "reports-to": "t1" });
@@ -138,13 +138,30 @@ describe("start", () => {
     expect(JSON.parse(s.calls[0]!.slice(4)).argv.slice(0, 6)).toEqual(["/bin/zsh", "-lic", 'exec "$@"', "zsh", "env", "-u"]);
   });
 
+  it("V2: a caller whose Claude was typed into a tab's shell still passes its plugin set (verifier finding 2, live)", async () => {
+    const world = plenary();
+    Object.assign(world.terminals[0]!, {
+      argv: ["/bin/zsh", "-l"],
+      foreground: { pid: 4, argv: ["claude", "--settings", "/s.json", "--plugin-dir", "/p/engram", "--plugin-dir", "/p/herderp-teams", "--model", "sonnet"], cwd: "/repo" },
+    });
+    const started = await setup(world).team.start({ kind: "claude", prompt: "Reply ok.", job: "j", argv: ["--model", "haiku"] });
+    expect(started.argv).toEqual(["claude", "--settings", "/s.json", "--plugin-dir", "/p/engram", "--plugin-dir", "/p/herderp-teams", "--model", "haiku", "--", "Reply ok."]);
+  });
+
+  it("V3: the prompt is fenced off with --, so a multi-value flag or a leading dash cannot swallow it; other agents get no --", async () => {
+    const s = setup(plenary());
+    const claude = await s.team.start({ kind: "claude", prompt: "-v is the flag to explain", job: "j", settings: "/s.json", argv: ["--add-dir", "/d"] });
+    expect(claude.argv).toEqual(["claude", "--settings", "/s.json", "--add-dir", "/d", "--", "-v is the flag to explain"]);
+    expect((await s.team.start({ kind: "codex", prompt: "go", job: "j" })).argv).toEqual(["codex", "go"]);
+  });
+
   it("explicit plugins, argv, labels, space by name, reportsTo and tabLabel all override the defaults", async () => {
     const s = setup(plenary());
     const started = await s.team.start({
       kind: "claude", prompt: "go", job: "p3", tabLabel: "worker p3 (engine): scaffold", space: "plenary", reportsTo: "t2",
       settings: "/other.json", pluginDirs: ["/p/sdd"], argv: ["--model", "haiku"], labels: { track: "engine" }, cwd: "/elsewhere",
     });
-    expect(started.argv).toEqual(["claude", "--settings", "/other.json", "--plugin-dir", "/p/sdd", "--model", "haiku", "go"]);
+    expect(started.argv).toEqual(["claude", "--settings", "/other.json", "--plugin-dir", "/p/sdd", "--model", "haiku", "--", "go"]);
     expect(started.labels).toEqual({ track: "engine", "herdr.space": SPACE, job: "p3", "reports-to": "t2" });
     expect(started.tabLabel).toBe("worker p3 (engine): scaffold");
     expect(JSON.parse(s.calls[0]!.slice(4)).cwd).toBe("/elsewhere");
@@ -206,7 +223,7 @@ describe("start", () => {
     expect((await failure(s.team.start({ kind: "claude", prompt: "go", job: "j" }))).message).toContain(`requires "space"`);
     expect((await failure(s.team.start({ kind: "claude", prompt: "go", job: "j", space: SPACE }))).message).toContain(`requires "reportsTo"`);
     const started = await s.team.start({ kind: "claude", prompt: "go", job: "j", space: SPACE, reportsTo: "t2" });
-    expect(started.argv).toEqual(["claude", "go"]);
+    expect(started.argv).toEqual(["claude", "--", "go"]);
     expect(JSON.parse(s.calls[0]!.slice(4)).cwd).toBe("/repo"); // the space's folder
   });
 
@@ -271,7 +288,7 @@ describe("recycle", () => {
     const run = JSON.parse(s.calls[0]!.slice(4));
     expect(run.argv.slice(1 + CLAUDE_SESSION_MARKERS.length * 2)).toEqual([
       "claude", "--settings", "/s.json", "--plugin-dir", "/p/engram", "--plugin-dir", "/p/herderp", "--model", "opus",
-      "Read docs/handoff/manager.md and continue as manager.",
+      "--", "Read docs/handoff/manager.md and continue as manager.",
     ]);
     expect(run.labels).toEqual({ "herdr.space": SPACE, plenary: "manager", "plenary.reports-to": "t1" });
     expect(s.calls.slice(1)).toEqual([
@@ -303,7 +320,43 @@ describe("recycle", () => {
     Object.assign(world.terminals[1]!, { argv: ["/bin/zsh", "-l"], foreground: { pid: 5, argv: ["claude", "--plugin-dir", "/p/x", "old prompt"], cwd: "/repo" } });
     const s = setup(world, { files: ["/repo/h.md"] });
     await s.team.recycle({ target: "t2", handoff: "h.md" });
-    expect(JSON.parse(s.calls[0]!.slice(4)).argv.slice(-4)).toEqual(["claude", "--plugin-dir", "/p/x", "Read h.md and continue as manager."]);
+    expect(JSON.parse(s.calls[0]!.slice(4)).argv.slice(-5)).toEqual(["claude", "--plugin-dir", "/p/x", "--", "Read h.md and continue as manager."]);
+  });
+
+  it("V1: refuses a target on no team or outside the caller's space, and writes nothing (verifier finding 1, live: t16d)", async () => {
+    const world = plenary();
+    // A person's own session typed into a shell of another space, no team labels - as t16d was.
+    world.terminals.push(terminal("t16", { labels: { "herdr.space": OTHER }, argv: ["/bin/zsh", "-l"], foreground: { pid: 8, argv: ["claude"], cwd: "/o" } }));
+    world.spaces[1]!.tabs.push(tab("tb16", "1", "t16"));
+    const s = setup(world, { files: ["/o/h.md", "/repo/h.md"] });
+    expect((await failure(s.team.recycle({ target: "t16", handoff: "h.md" }))).code).toBe("outside_team");
+    expect((await failure(s.team.recycle({ target: "t16", handoff: "h.md", space: OTHER }))).code).toBe("not_a_member");
+    // In the caller's own space but with no team label: someone's own session (t5).
+    expect((await failure(s.team.recycle({ target: "t5", handoff: "h.md" }))).code).toBe("not_a_member");
+    // A labelled member of another space is reachable only by naming that space.
+    expect((await failure(s.team.recycle({ target: "t6", handoff: "h.md" }))).code).toBe("outside_team");
+    expect(s.calls).toEqual([]);
+  });
+
+  it("V1: outside the Herdr app the team must be named", async () => {
+    const s = setup(plenary(), { env: {}, files: ["/repo/h.md"] });
+    expect((await failure(s.team.recycle({ target: "t2", handoff: "h.md" }))).message).toContain(`requires "space"`);
+    expect((await s.team.recycle({ target: "t2", handoff: "h.md", space: "plenary" })).retired).toBe("t2");
+  });
+
+  it("V11: re-points only this machine's terminals (a remote reports-to names its own machine's terminal)", async () => {
+    const world = plenary();
+    world.terminals.push(terminal("ska/t30", { machine: "ska", labels: { "reports-to": "t2" } }));
+    const s = setup(world, { files: ["/repo/h.md"] });
+    expect((await s.team.recycle({ target: "t2", handoff: "h.md" })).repointed).toEqual(["t3", "t4"]);
+  });
+
+  it("V3: the hand-off prompt survives a multi-value flag carried from the old launch line", async () => {
+    const world = plenary();
+    world.terminals[1]!.argv = ["claude", "--model", "opus", "--add-dir", "/x", "old prompt"];
+    const s = setup(world, { files: ["/repo/h.md"] });
+    await s.team.recycle({ target: "t2", handoff: "h.md" });
+    expect(JSON.parse(s.calls[0]!.slice(4)).argv.slice(-7)).toEqual(["claude", "--model", "opus", "--add-dir", "/x", "--", "Read h.md and continue as manager."]);
   });
 
   it("touches nothing when the hand-off file is missing or the successor does not start", async () => {
@@ -329,7 +382,7 @@ describe("recycle", () => {
 
   it("refuses an already-retired member, a remote one, a non-Claude one, and one in no space", async () => {
     const world = plenary();
-    world.terminals.push(terminal("ska/t9", { machine: "ska" }), terminal("t10", { argv: ["codex", "go"], foreground: { pid: 9, argv: ["codex", "go"], cwd: "/repo" } }), terminal("t11", { labels: { "herdr.space": "" } }));
+    world.terminals.push(terminal("ska/t9", { machine: "ska" }), terminal("t10", { labels: { job: "c" }, argv: ["codex", "go"], foreground: { pid: 9, argv: ["codex", "go"], cwd: "/repo" } }), terminal("t11", { labels: { "herdr.space": "" } }));
     const s = setup(world, { files: ["/repo/h.md"] });
     expect((await failure(s.team.recycle({ target: "t4", handoff: "h.md" }))).code).toBe("already_retired");
     expect((await failure(s.team.recycle({ target: "ska/t9", handoff: "h.md" }))).code).toBe("unsupported_remote");
@@ -366,11 +419,45 @@ describe("cleanup", () => {
       t404: "no such terminal (already removed?)",
       t1: "that is you",
       t6: `not in space "plenary"`,
-      t5: "not a team member (no reports-to, job or retired label)",
+      t5: "not a team member (no role, job or reports-to label)",
       t2: "still has reports (t3, t4)",
       t3: "still working",
     });
     expect(s.calls).toEqual([]);
+  });
+
+  it("V5: a retired label alone proves nothing - a plain shell labelled retired=fake is left alone, default or named", async () => {
+    const world = plenary();
+    world.terminals.find((t) => t.address === "t7")!.labels.retired = "fake";
+    world.terminals.find((t) => t.address === "t5")!.labels.retired = "fake";
+    const s = setup(world);
+    expect((await s.team.cleanup({})).closed.map((r) => r.target)).toEqual(["t4"]);
+    const named = await s.team.cleanup({ targets: ["t7", "t5"] });
+    expect(named.closed).toEqual([]);
+    expect(named.skipped.map((r) => r.reason.split(" - ")[0])).toEqual(["not a team member (no role, job or reports-to label)", "not a team member (no role, job or reports-to label)"]);
+  });
+
+  it("V6: a leader started with a role and nothing else is a member and can be cleaned up when named", async () => {
+    const world = plenary();
+    world.terminals.push(terminal("t20", { labels: { role: "orchestrator" } }));
+    world.spaces[0]!.tabs.push(tab("tb20", "lead", "t20"));
+    const s = setup(world, { env: { HC_TERMINAL_ID: "t3" } });
+    expect((await s.team.cleanup({ targets: ["t20"] })).closed).toEqual([{ target: "t20", tabClosed: true, gone: true }]);
+  });
+
+  it("V7: a terminal that joined the member's tab after the first listing is not taken down with it", async () => {
+    const world = plenary();
+    let asked = 0;
+    const s = setup(world, {
+      core: {
+        appSpaces: async () => {
+          if (++asked > 1) world.spaces[0]!.tabs[3] = tab("tb4", "retired verifier p1v", "t4", "t99");
+          return world.spaces;
+        },
+      },
+    });
+    expect((await s.team.cleanup({})).closed).toEqual([{ target: "t4", tabClosed: false, gone: true }]);
+    expect(s.calls).toEqual(["kill t4", "rm t4"]);
   });
 
   it("force ends a working member; a parent goes when its reports go in the same call", async () => {

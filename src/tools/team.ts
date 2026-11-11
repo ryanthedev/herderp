@@ -12,6 +12,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerTool } from "../registry.js";
 import type { Team } from "../team/core.js";
 import { DEFAULT_STALL_MS } from "../team/roster.js";
+import { AGENT_KIND } from "./curated.js";
 
 const TOOL = "herdr_team";
 
@@ -30,20 +31,25 @@ const DESCRIPTION =
   "Run a team of agent sessions in the Herdr app: a space is a team, each member is a session in its own named tab, and the " +
   "`reports-to` label ties them into a tree. Herdr app (herdr-core) only. Pick with `action`:\n" +
   "- start: start a member in one call - launch it, label it, find its tab and rename it (kind, and prompt or brief; role and/or job, " +
-  "or tabLabel). brief is a file path and becomes 'Read <brief> and do it.'. Defaults: space = yours, reportsTo = you ('none' = top of " +
+  "or tabLabel). brief is a file path and becomes 'Read <brief> and do it.'. For claude the prompt is passed after `--`. Defaults: space = yours, reportsTo = you ('none' = top of " +
   "the tree), cwd = yours, tabLabel = '<role> <job>', and for claude the same --settings and --plugin-dir list you were started with " +
   "(override with settings / pluginDirs). argv adds arguments before the prompt; labels adds extra labels; passEnv names environment " +
   "variables to copy from your session into the new one (values are never shown). Returns target (terminal id) and tabId.\n" +
-  "- roster: a space's team as a tree by reports-to (optional space, stallMs). Each member: role, job, tab label, status, contextPct " +
+  "- roster: a space's team as a tree by reports-to (optional space, stallMs, drafts). Each member: role, job, tab label, status, contextPct " +
   "(pane footer), lastMessage. `attention` lists who needs a look, worst first: permission (waiting on a permission prompt, with the " +
-  "prompt text), blocked, question (stopped with a question), draft (text typed in its composer while it works, unsent), stalled, context (60% or more). Each member's `composer` is the text in its composer; once it has stopped that may be Claude Code's own greyed suggestion, so it is not flagged.\n" +
+  "prompt text; `message` has the whole command), blocked, question (stopped with a question), draft (text typed in its composer while " +
+  "it works, unsent), unstarted (idle, never ran a turn: its prompt did not arrive), stalled, context (60% or more). Each member's " +
+  "`composer` is the text in its composer; once it has stopped that may be Claude Code's own greyed suggestion, so it is flagged " +
+  "(`maybe-draft`) only with drafts:true.\n" +
   "- watch: one watch over a member and everyone under it (target; optional stallMs, once, json, verbose). Returns a command for the " +
   "Monitor tool. A snapshot: members started later are not covered until you re-arm it.\n" +
   "- recycle: hand a member off to a fresh successor (handoff = the hand-off file, which must exist; optional target, default you; " +
-  "optional prompt, passEnv). The successor gets the same labels, launch flags, folder, tab label and reports-to; the old one's reports " +
+  "optional prompt, passEnv). The target must be a labelled member (role, job or reports-to) of your space, or of the space you name. " +
+  " The successor gets the same labels, launch flags, folder, tab label and reports-to; the old one's reports " +
   "are re-pointed, and it is labelled retired and its tab renamed 'retired ...'. It is never killed here.\n" +
   "- cleanup: close the tab and end the terminal of members that are retired or whose program has ended (optional space, targets, " +
-  "dryRun, force). Only team members of that space; never you, never one that still has reports, never by status alone.\n" +
+  "dryRun, force). Only labelled members (role, job or reports-to) of that space - a retired label alone is not enough; never you, " +
+  "never one that still has reports, never by status alone.\n" +
   "Labels: role (orchestrator = leader), job, reports-to=<terminal id>, retired=<successor>. Teams started by hand with " +
   "<project>.reports-to are read too.";
 
@@ -56,7 +62,7 @@ export function registerTeamTools(server: McpServer, team: Team): void {
       space: z.string().optional(),
       target: z.string().optional(),
       targets: z.array(z.string()).max(MAX_TEAM_TARGETS).optional(),
-      kind: z.string().optional(),
+      kind: AGENT_KIND.optional(),
       prompt: z.string().optional(),
       brief: z.string().optional(),
       role: z.string().optional(),
@@ -74,6 +80,7 @@ export function registerTeamTools(server: McpServer, team: Team): void {
       once: z.boolean().optional(),
       json: z.boolean().optional(),
       verbose: z.boolean().optional(),
+      drafts: z.boolean().optional(),
       dryRun: z.boolean().optional(),
       force: z.boolean().optional(),
     },
@@ -95,7 +102,7 @@ export function registerTeamTools(server: McpServer, team: Team): void {
           };
         }
         case "roster": {
-          const roster = await team.roster({ space: args.space, stallMs: args.stallMs });
+          const roster = await team.roster({ space: args.space, stallMs: args.stallMs, drafts: args.drafts });
           return {
             ...roster,
             hint:
@@ -123,6 +130,7 @@ export function registerTeamTools(server: McpServer, team: Team): void {
         case "recycle": {
           const result = await team.recycle({
             target: args.target,
+            space: args.space,
             handoff: need(args.handoff, "handoff", "recycle"),
             prompt: args.prompt,
             passEnv: args.passEnv,

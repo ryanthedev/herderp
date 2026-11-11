@@ -37,6 +37,22 @@ describe("herdr_team", () => {
     expect(s.calls).toEqual([]);
   });
 
+  it("kind is the same agent list herdr_agent takes; the schema refuses anything else", async () => {
+    const server = new McpServer({ name: "t", version: "0" });
+    registerTeamTools(server, {} as Team);
+    const schema = (server as unknown as { _registeredTools: Record<string, { inputSchema: { safeParse(v: unknown): { success: boolean } } }> })._registeredTools.herdr_team!.inputSchema;
+    expect(schema.safeParse({ action: "start", kind: "claude" }).success).toBe(true);
+    expect(schema.safeParse({ action: "start", kind: "rm -rf" }).success).toBe(false);
+  });
+
+  it("recycle passes the named space through; roster passes drafts", async () => {
+    const s = setup();
+    await s.call({ action: "recycle", target: "t2", handoff: "h.md", space: "api" });
+    await s.call({ action: "roster", drafts: true });
+    expect(s.calls[0]![1]).toMatchObject({ target: "t2", space: "api" });
+    expect(s.calls[1]![1]).toMatchObject({ drafts: true });
+  });
+
   it("start returns the terminal and tab ids with a hint to the next call", async () => {
     const s = setup();
     const { body } = await s.call({ action: "start", kind: "claude", brief: "b.md", job: "p1" });
@@ -59,7 +75,7 @@ describe("herdr_team", () => {
   it("roster's hint says how many need a look, or that nobody does", async () => {
     expect((await setup().call({ action: "roster", stallMs: 120_000 })).body.hint).toContain("nobody needs a look; stalled means no transcript movement for 2 min");
     const busy = setup({
-      roster: async () => ({ space: { id: "sp1", name: "api" }, leader: null, tree: [], infrastructure: [], warnings: [], you: null, attention: [{ target: "t3", tabLabel: "w", flags: ["permission"], why: "x", detail: "rm" }] }),
+      roster: async () => ({ space: { id: "sp1", name: "api" }, leader: null, tree: [], infrastructure: [], warnings: [], you: null, attention: [{ target: "t3", tabLabel: "w", flags: ["permission"], why: "x", detail: "rm", message: "approve Bash: rm" }] }),
     });
     expect((await busy.call({ action: "roster" })).body.hint).toStartWith("1 need a look");
   });

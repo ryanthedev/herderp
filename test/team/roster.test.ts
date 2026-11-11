@@ -8,7 +8,7 @@ import {
   endsWithQuestion,
   extractFlags,
   loginLaunch,
-  hasTeamLabel,
+  isTeamMember,
   jobOf,
   parseBlockedPrompt,
   parseContextPct,
@@ -65,11 +65,13 @@ describe("labels", () => {
     expect(jobOf({ plenary: "proxy" })).toBeNull();
   });
 
-  it("a team label is reports-to, job or retired - a space label alone is not one", () => {
-    expect(hasTeamLabel({ "herdr.space": "sp1" })).toBe(false);
-    expect(hasTeamLabel({ "herderp.reports-to": "t13s" })).toBe(true);
-    expect(hasTeamLabel({ job: "x" })).toBe(true);
-    expect(hasTeamLabel({ retired: "t9" })).toBe(true);
+  it("V5/V6: a member has a role, a job or a reports-to - never a retired label alone, a space alone, or role=proxy", () => {
+    expect(isTeamMember({ "herdr.space": "sp1" })).toBe(false);
+    expect(isTeamMember({ "herdr.space": "sp1", retired: "fake" })).toBe(false);
+    expect(isTeamMember({ role: "proxy" })).toBe(false);
+    expect(isTeamMember({ "herdr.space": "sp1", role: "orchestrator" })).toBe(true);
+    expect(isTeamMember({ "herderp.reports-to": "t13s" })).toBe(true);
+    expect(isTeamMember({ job: "x" })).toBe(true);
   });
 });
 
@@ -80,6 +82,9 @@ describe("screen heuristics", () => {
     expect(parseContextPct("just a shell\n$ ls\n")).toBeNull();
     expect(parseContextPct("progress · 250%")).toBeNull();
     expect(parseContextPct("   Opus 5.5 ·  medium ·  9%")).toBe(9); // without icon glyphs
+    // V13: only the footer at the very bottom counts, not a line of the agent's own output further up.
+    expect(parseContextPct(`progress · 50%\n\n${screenWith("❯ ", 7)}`)).toBe(7);
+    expect(parseContextPct(`progress · 50%\n${RULE}\n❯\n${RULE}\n  some other footer\n  -- INSERT --`)).toBeNull();
   });
 
   it("an empty composer is no draft; typed text is, across lines", () => {
@@ -101,6 +106,19 @@ describe("screen heuristics", () => {
     expect(parseBlockedPrompt("Which database?\n  ❯ postgres\n    sqlite")).toMatchObject({ permission: false });
   });
 
+  it("V10: an old '1. Yes' further up, or one that a later choice list follows, is not the live prompt", () => {
+    expect(parseBlockedPrompt("notes:\n 1. Yes we can\n\n Which color?\n ❯ 1. Red\n   2. Blue").permission).toBe(false);
+    expect(parseBlockedPrompt(`Allow ls ?\n  1. Yes\n  2. No\n${"output line\n".repeat(30)}Which one?`).permission).toBe(false);
+    const boxed = "╭────╮\n│ Bash command │\n│   bun test │\n│ Do you want to proceed? │\n│ ❯ 1. Yes │\n│   2. Yes, and don't ask again │\n│   3. No │\n╰────╯\n Esc to cancel";
+    expect(parseBlockedPrompt(boxed.replace(/│ /g, "").replace(/ │/g, ""))).toMatchObject({ permission: true });
+  });
+
+  it("V13: a question with a (y/n) tail, or followed by one sign-off line, still counts", () => {
+    expect(endsWithQuestion("Done.\nShould I continue? (y/n)")).toBe(true);
+    expect(endsWithQuestion("Is it ok?\n\nLet me know.")).toBe(true);
+    expect(endsWithQuestion("Is it ok?\nI assumed yes.\nDone.")).toBe(false);
+  });
+
   it("a reply ending in a question mark is a question", () => {
     expect(endsWithQuestion("I did X.\nShould I also do Y?")).toBe(true);
     expect(endsWithQuestion("Should I do Y? I went ahead.")).toBe(false);
@@ -111,7 +129,7 @@ describe("screen heuristics", () => {
 
 function facts(target: string, over: Partial<MemberFacts> = {}): MemberFacts {
   return {
-    target, labels: {}, status: "working", blockedKind: null, message: "", createdMs: Number(target.replace(/\D/g, "")),
+    target, labels: {}, status: "working", blockedKind: null, message: "", turn: 1, createdMs: Number(target.replace(/\D/g, "")),
     tabId: `tb-${target}`, tabLabel: `tab ${target}`, screen: RAW_SCREEN_WORKING, lastReply: null, activityAt: null, ...over,
   };
 }
@@ -205,6 +223,24 @@ describe("buildRoster", () => {
     expect(roster.attention[4]!.why).toContain("12 min");
     expect(roster.attention[1]!.why).toBe("blocked (auth)");
     expect(roster.tree.find((m) => m.target === "t8")).toMatchObject({ composer: "keep the train moving", flags: [] });
+  });
+
+  it("V4: with drafts on, a stopped member's composer text is listed as maybe-draft, last and labelled as unsure", () => {
+    const f = [facts("t1", { status: "done", screen: screenWith("❯ idledraft", 12) }), facts("t2", { status: "working", screen: screenWith("❯ wipdraft", 12) })];
+    expect(buildRoster(f, { now: NOW, live: live() }).attention.map((a) => [a.target, a.flags])).toEqual([["t2", ["draft"]]]);
+    const on = buildRoster(f, { now: NOW, live: live(), drafts: true }).attention;
+    expect(on.map((a) => [a.target, a.flags, a.detail])).toEqual([["t2", ["draft"], "wipdraft"], ["t1", ["maybe-draft"], "idledraft"]]);
+    expect(on[1]!.why).toContain("greyed suggestion");
+  });
+
+  it("V12: a member that is idle and never ran a turn is flagged unstarted", () => {
+    const roster = buildRoster([facts("t1", { status: "idle", turn: 0 }), facts("t2", { status: "working", turn: 0 }), facts("t3", { status: "idle", turn: 3 })], { now: NOW, live: live() });
+    expect(roster.attention.map((a) => [a.target, a.flags])).toEqual([["t1", ["unstarted"]]]);
+  });
+
+  it("V9: an attention row carries the agent's own status note, which holds the whole command of a permission prompt", () => {
+    const roster = buildRoster([facts("t1", { status: "blocked", blockedKind: "permission", message: "approve Bash: bun test --all", screen: "no list here" })], { now: NOW, live: live() });
+    expect(roster.attention[0]).toMatchObject({ flags: ["permission"], message: "approve Bash: bun test --all" });
   });
 
   it("an unreadable screen leaves contextPct null and raises no screen flags", () => {

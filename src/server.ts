@@ -17,6 +17,11 @@ import { registerNecromancyTools } from "./tools/necromancy.js";
 import { createCoreClient, type CoreClient } from "./core/client.js";
 import { createSessionLookup } from "./core/sessions.js";
 import { createCoreView } from "./core/view.js";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { lastReply } from "./necromancy/reply.js";
+import { createTeam, fileExists, transcriptActivity } from "./team/core.js";
+import { registerTeamTools } from "./tools/team.js";
 
 export const SERVER_NAME = "derp";
 export const SERVER_VERSION = "0.15.3";
@@ -73,9 +78,23 @@ async function main(): Promise<void> {
   registerHostTools(server, hosts);
   // Necromancy reads session files from THIS machine's disk, so it stays
   // bound to the local engines; remote hosts are a curated-tools concern.
-  registerNecromancyTools(server, createNecromancy({ client, liveViews: [createCoreView(core, sessions)] }), {
+  const necromancy = createNecromancy({ client, liveViews: [createCoreView(core, sessions)] });
+  registerNecromancyTools(server, necromancy, {
     currentWorkspace: () => currentWorkspace(core, process.env),
   });
+  registerTeamTools(
+    server,
+    createTeam({
+      core,
+      sessions,
+      env: process.env,
+      lastReply: (sessionId, cwd) => lastReply(necromancy, sessionId, cwd),
+      activityAt: transcriptActivity(join(homedir(), ".claude", "projects")),
+      fileExists,
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      now: Date.now,
+    }),
+  );
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

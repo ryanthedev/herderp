@@ -253,15 +253,22 @@ export function coreAgentTool(bridge: BridgeDeps) {
         rejectUntil(args.until, tool, action);
         // Name the sender, so the agent reads <hc from="t3s">...</hc> and knows who is
         // talking to it. hc only tags a send whose caller is one of its terminals.
-        const from = callerOf(bridge.env).engine === "core" ? (bridge.env?.HC_TERMINAL_ID ?? null) : null;
-        const sent = await core.terminalSend(t(), need(args.text, "text", tool, action), {
+        // A slash command or `!` shell line goes unsigned: wrapped in the tag it is just
+        // a message, and on 2026-11-11 a Haiku agent answered a wrapped /reload-plugins
+        // with "Plugins reloaded" without running it.
+        const text = need(args.text, "text", tool, action);
+        const command = isComposerCommand(text);
+        const from = !command && callerOf(bridge.env).engine === "core" ? (bridge.env?.HC_TERMINAL_ID ?? null) : null;
+        const sent = await core.terminalSend(t(), text, {
           wait: args.wait,
           timeoutMs: args.timeoutMs,
           ...(from ? { caller: from } : {}),
         });
         const signed = from
           ? { from }
-          : { from: null, fromNote: "sent unsigned: this session is not a Herdr app terminal, so the agent sees no sender - say who you are in the text" };
+          : command
+            ? { from: null, fromNote: "sent unsigned so it runs as a command (a sender tag would turn it into a plain message)" }
+            : { from: null, fromNote: "sent unsigned: this session is not a Herdr app terminal, so the agent sees no sender - say who you are in the text" };
         if (args.wait) {
           return ok(
             sent.wait?.ended === false
@@ -361,6 +368,11 @@ export function markHerdrAgents(result: ToolResult, args: { action: string; host
     return mine ? { ...result, agent: { ...agent, you: true } } : result;
   }
   return result;
+}
+
+/** A line the agent's composer runs itself (`/reload-plugins`, `!ls`) rather than reading as a message. */
+export function isComposerCommand(text: string): boolean {
+  return /^[/!]/.test(text.trimStart());
 }
 
 /** Actions that only look: a bare name found while the other engine is down may still answer these. */

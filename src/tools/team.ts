@@ -36,7 +36,7 @@ const DESCRIPTION =
   "variables to copy from your session into the new one (values are never shown). Returns target (terminal id) and tabId.\n" +
   "- roster: a space's team as a tree by reports-to (optional space, stallMs). Each member: role, job, tab label, status, contextPct " +
   "(pane footer), lastMessage. `attention` lists who needs a look, worst first: permission (waiting on a permission prompt, with the " +
-  "prompt text), blocked, question (stopped with a question), draft (unsent text in its composer), stalled, context (60% or more).\n" +
+  "prompt text), blocked, question (stopped with a question), draft (text typed in its composer while it works, unsent), stalled, context (60% or more). Each member's `composer` is the text in its composer; once it has stopped that may be Claude Code's own greyed suggestion, so it is not flagged.\n" +
   "- watch: one watch over a member and everyone under it (target; optional stallMs, once, json, verbose). Returns a command for the " +
   "Monitor tool. A snapshot: members started later are not covered until you re-arm it.\n" +
   "- recycle: hand a member off to a fresh successor (handoff = the hand-off file, which must exist; optional target, default you; " +
@@ -100,7 +100,7 @@ export function registerTeamTools(server: McpServer, team: Team): void {
             ...roster,
             hint:
               roster.attention.length > 0
-                ? `${roster.attention.length} need a look (attention, worst first): answer a permission prompt with herdr_agent{action:'send_keys'}, a question with herdr_agent{action:'prompt'}, context with herdr_team{action:'recycle'}. question and draft are heuristics - herdr_agent{action:'read'} to confirm`
+                ? `${roster.attention.length} need a look (attention, worst first): answer a permission prompt with herdr_agent{action:'send_keys'}, a question with herdr_agent{action:'prompt'}, context with herdr_team{action:'recycle'}. question is a heuristic - herdr_agent{action:'read'} to confirm`
                 : `nobody needs a look; stalled means no transcript movement for ${Math.round((args.stallMs ?? DEFAULT_STALL_MS) / 60_000)} min. herdr_team{action:'watch',target} to be told when a subtree stops`,
           };
         }

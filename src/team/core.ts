@@ -2,7 +2,8 @@
 // members are Claude (or other agent) sessions in tabs; roster.ts holds the
 // rules, this file carries them out through CoreClient:
 //
-//   start    terminal.run (labels set at birth, never parented) -> wait for
+//   start    terminal.run through the user's login shell (labels set at
+//            birth, never parented, their own environment) -> wait for
 //            the window to give it a tab -> rename the tab
 //   roster   terminal.list + the window's tabs + each member's screen, last
 //            reply and transcript time -> roster.ts's tree
@@ -40,6 +41,7 @@ import {
   LABEL_RETIRED,
   LABEL_ROLE,
   LABEL_SPACE,
+  loginLaunch,
   reportsToKey,
   reportsToOf,
   stripEnvWrapper,
@@ -212,7 +214,13 @@ export function createTeam(deps: TeamDeps): Team {
     const picked = pickEnv(opts.passEnv);
     // cleanLaunch: a core started from a Claude shell would otherwise hand the
     // new Claude that session's markers, and it would save no transcript.
-    const terminal = await core.terminalRun({ argv: cleanLaunch(opts.argv), cwd: opts.cwd, labels: opts.labels, env: picked.env });
+    // loginLaunch: the core starts programs with no shell profile, so the user's own environment is loaded first.
+    const terminal = await core.terminalRun({
+      argv: loginLaunch(cleanLaunch(opts.argv), deps.env?.SHELL),
+      cwd: opts.cwd,
+      labels: opts.labels,
+      env: picked.env,
+    });
     const warnings: string[] = [];
     let tabId: string | null = null;
     // A fresh terminal carries no `herdr.tab` label; the window is asked instead.

@@ -7,6 +7,7 @@ import {
   carriedFlags,
   endsWithQuestion,
   extractFlags,
+  loginLaunch,
   hasTeamLabel,
   jobOf,
   parseBlockedPrompt,
@@ -29,7 +30,7 @@ const RAW_SCREEN_WORKING = `⏺ Both stopped, so I'm rewriting drive.js.
 ${RULE}
 ❯
 ${RULE}
-   Opus 5.5 ·  medium ·  16%
+  \uf2db Opus 5.5 · \uf0e7 medium · \uf0e4 16%
   -- INSERT -- ⏵⏵ auto mode on · 1 monitor`;
 
 const screenWith = (composer: string, pct = 61) => `⏺ Done.
@@ -37,7 +38,7 @@ const screenWith = (composer: string, pct = 61) => `⏺ Done.
 ${RULE}
 ${composer}
 ${RULE}
-   Fable 5.2 ·  medium ·  ${pct}%
+  \uf2db Fable 5.2 · \uf0e7 medium · \uf0e4 ${pct}%
   -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle)`;
 
 /** Copied from `hc read t10v`, 2026-11-11: a blocked pane asking yes/no. */
@@ -78,11 +79,13 @@ describe("screen heuristics", () => {
     expect(parseContextPct(screenWith("❯ ", 100))).toBe(100);
     expect(parseContextPct("just a shell\n$ ls\n")).toBeNull();
     expect(parseContextPct("progress · 250%")).toBeNull();
+    expect(parseContextPct("   Opus 5.5 ·  medium ·  9%")).toBe(9); // without icon glyphs
   });
 
   it("an empty composer is no draft; typed text is, across lines", () => {
     expect(parseDraft(RAW_SCREEN_WORKING)).toBeNull();
     expect(parseDraft(screenWith("❯ ship it when green"))).toBe("ship it when green");
+    expect(parseDraft(screenWith("❯\u00a0tell the engine manager the report is ready"))).toBe("tell the engine manager the report is ready");
     expect(parseDraft(screenWith("❯ first line\n  second line"))).toBe("first line\nsecond line");
     expect(parseDraft("no composer here")).toBeNull();
   });
@@ -179,7 +182,8 @@ describe("buildRoster", () => {
       [
         facts("t1", { status: "done", lastReply: "Built it.\nShould I push?" }),
         facts("t2", { status: "blocked", screen: RAW_SCREEN_PERMISSION }),
-        facts("t3", { status: "idle", screen: screenWith("❯ dont forget the tests", 12) }),
+        facts("t3", { status: "working", screen: screenWith("❯ dont forget the tests", 12) }),
+        facts("t8", { status: "done", screen: screenWith("❯ keep the train moving", 12) }), // a stopped pane's composer may be a suggestion
         facts("t4", { status: "working", activityAt: NOW - 700_000 }),
         facts("t5", { status: "working", screen: screenWith("❯ ", 60), activityAt: NOW - 1000 }),
         facts("t6", { status: "blocked", blockedKind: "auth", screen: "Login required" }),
@@ -200,6 +204,7 @@ describe("buildRoster", () => {
     expect(roster.attention[3]!.detail).toBe("dont forget the tests");
     expect(roster.attention[4]!.why).toContain("12 min");
     expect(roster.attention[1]!.why).toBe("blocked (auth)");
+    expect(roster.tree.find((m) => m.target === "t8")).toMatchObject({ composer: "keep the train moving", flags: [] });
   });
 
   it("an unreadable screen leaves contextPct null and raises no screen flags", () => {
@@ -247,6 +252,14 @@ describe("launch lines", () => {
     expect(carriedFlags(["claude", "--model", "opus", "--plugin-dir", "/a", "--dangerously-skip-permissions", "old prompt"])).toEqual([
       "--model", "opus", "--plugin-dir", "/a", "--dangerously-skip-permissions",
     ]);
+  });
+
+  it("loginLaunch runs the line through zsh or bash as a login + interactive shell that becomes the program", () => {
+    expect(loginLaunch(["env", "-u", "A", "claude", "go"], "/bin/zsh")).toEqual(["/bin/zsh", "-lic", 'exec "$@"', "zsh", "env", "-u", "A", "claude", "go"]);
+    expect(loginLaunch(["claude"], "/usr/local/bin/fish")).toEqual(["claude"]);
+    expect(loginLaunch(["claude"], undefined)).toEqual(["claude"]);
+    expect(stripEnvWrapper(loginLaunch(["env", "-u", "A", "claude", "go"], "/opt/homebrew/bin/bash"))).toEqual(["claude", "go"]);
+    expect(carriedFlags(loginLaunch(["env", "-u", "A", "claude", "--model", "opus", "go"], "/bin/zsh"))).toEqual(["--model", "opus"]);
   });
 
   it("stripEnvWrapper leaves a plain line alone", () => {

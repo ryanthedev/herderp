@@ -132,6 +132,12 @@ describe("start", () => {
     expect(s.calls[1]).toBe(`app tab.rename {"id":"tb-t900","name":"worker p2"}`);
   });
 
+  it("goes through the caller's login shell when there is one, so the member gets the user's own environment", async () => {
+    const s = setup(plenary(), { env: { HC_TERMINAL_ID: "t1", SHELL: "/bin/zsh" } });
+    await s.team.start({ kind: "claude", prompt: "go", job: "j" });
+    expect(JSON.parse(s.calls[0]!.slice(4)).argv.slice(0, 6)).toEqual(["/bin/zsh", "-lic", 'exec "$@"', "zsh", "env", "-u"]);
+  });
+
   it("explicit plugins, argv, labels, space by name, reportsTo and tabLabel all override the defaults", async () => {
     const s = setup(plenary());
     const started = await s.team.start({

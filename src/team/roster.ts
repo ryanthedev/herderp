@@ -60,8 +60,9 @@ export function hasTeamLabel(labels: Record<string, string>): boolean {
 // --- screen reading (heuristics) ---------------------------------------------
 
 /**
- * Context use from Claude Code's pane footer (`   Opus 5.5 ·  medium ·  16%`),
- * read from the bottom of the screen. Null when no such line is there.
+ * Context use from Claude Code's pane footer (`  <glyph> Opus 5.5 · <glyph> medium · <glyph> 16%`;
+ * the glyphs are private-use icon characters), read from the bottom of the
+ * screen. Null when no such line is there.
  */
 export function parseContextPct(screen: string): number | null {
   const lines = screen.split("\n");
@@ -69,7 +70,7 @@ export function parseContextPct(screen: string): number | null {
     const line = lines[i]!.trimEnd();
     if (line.trim() === "") continue;
     seen++;
-    const match = /·\s*(\d{1,3})%\s*$/.exec(line);
+    const match = /·[^\d·]*(\d{1,3})%\s*$/.exec(line);
     if (match) {
       const pct = Number(match[1]);
       return pct <= 100 ? pct : null;
@@ -83,8 +84,11 @@ const RULE_RE = /^[─━]{20,}\s*$/;
 /**
  * Text sitting in Claude Code's composer, unsent: the lines between the two
  * rules at the bottom of the screen, after the `❯` prompt mark. Null when the
- * composer is empty or not on screen. Heuristic: plain screen text can't tell
- * typed text from a greyed suggestion Claude Code itself shows there.
+ * composer is empty or not on screen. Plain screen text can't tell typed text
+ * from the greyed suggestion Claude Code shows there after a turn (seen live
+ * 2026-11-11: six of plenary's stopped sessions "had a draft", all of them
+ * suggestions), so callers treat it as a draft only while the agent works -
+ * Claude Code shows no suggestion then.
  */
 export function parseDraft(screen: string): string | null {
   const lines = screen.split("\n").map((line) => line.trimEnd());
@@ -176,6 +180,8 @@ export interface Member {
   message: string;
   contextPct: number | null;
   lastMessage: string | null;
+  /** Text in its composer. Unsent typing, or - once it has stopped - possibly Claude Code's own greyed suggestion. */
+  composer: string | null;
   reportsTo: string | null;
   reportsToOutside: boolean;
   flags: Flag[];
@@ -238,11 +244,12 @@ function describe(facts: MemberFacts, options: RosterOptions): { member: Member;
     why.push("stopped with a question (heuristic: its last reply ends in one)");
     detail ??= facts.lastReply ? truncate(facts.lastReply, LAST_MESSAGE_CHARS) : null;
   }
-  const draft = facts.screen === null || facts.status === "blocked" ? null : parseDraft(facts.screen);
-  if (draft !== null) {
+  const composer = facts.screen === null || facts.status === "blocked" ? null : parseDraft(facts.screen);
+  // Only while it works: once it stops, the composer may hold Claude Code's own greyed suggestion.
+  if (composer !== null && facts.status === "working") {
     flags.add("draft");
-    why.push("text in its composer was never sent (heuristic: may be a greyed suggestion)");
-    detail ??= truncate(draft, LAST_MESSAGE_CHARS);
+    why.push("text typed in its composer while it works, not sent");
+    detail ??= truncate(composer, LAST_MESSAGE_CHARS);
   }
   if (facts.status === "working" && facts.activityAt !== null && options.now - facts.activityAt > stallMs) {
     flags.add("stalled");
@@ -267,6 +274,7 @@ function describe(facts: MemberFacts, options: RosterOptions): { member: Member;
     message: facts.message,
     contextPct,
     lastMessage: facts.lastReply ? truncate(facts.lastReply, LAST_MESSAGE_CHARS) : null,
+    composer: composer === null ? null : truncate(composer, LAST_MESSAGE_CHARS),
     reportsTo,
     reportsToOutside: false,
     flags: ordered,
@@ -362,16 +370,37 @@ export function subtreeOf(members: Array<{ target: string; labels: Record<string
 
 // --- launch lines --------------------------------------------------------------
 
-/** `env -u A -u B claude ...` -> `claude ...` (herderp's own clean-launch wrapper, or a hand-typed one). */
+/** The script `loginLaunch` hands the shell: become the program, so no shell stays in between. */
+const EXEC_ARGS = 'exec "$@"';
+const PROFILE_SHELLS: ReadonlySet<string> = new Set(["zsh", "bash"]);
+
+/**
+ * Runs a launch line through the user's login + interactive shell, so the
+ * new session gets the environment their own sessions have. herdr-core
+ * starts a `terminal.run` program directly, with the core's environment and
+ * no shell profile: verified 2026-11-11, sessions started with `hc run` had
+ * no ENGRAM_ADDR (set in the interactive profile) and Engram failed in every
+ * one with "name resolver error". Only zsh and bash are wrapped (`-lic` means
+ * the same in both); any other shell leaves the line as it is.
+ */
+export function loginLaunch(argv: readonly string[], shell: string | undefined): string[] {
+  const name = (shell ?? "").split("/").pop() ?? "";
+  if (!shell || !PROFILE_SHELLS.has(name)) return [...argv];
+  return [shell, "-lic", EXEC_ARGS, name, ...argv];
+}
+
+/** A launch line without its wrappers: `zsh -lic 'exec "$@"' zsh env -u A claude ...` -> `claude ...`. */
 export function stripEnvWrapper(argv: readonly string[]): string[] {
-  if (argv[0] !== "env") return [...argv];
+  let line = [...argv];
+  if (line[1] === "-lic" && line[2] === EXEC_ARGS) line = line.slice(4);
+  if (line[0] !== "env") return line;
   let i = 1;
-  while (i < argv.length) {
-    if (argv[i] === "-u" && i + 1 < argv.length) i += 2;
-    else if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[i]!)) i += 1;
+  while (i < line.length) {
+    if (line[i] === "-u" && i + 1 < line.length) i += 2;
+    else if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(line[i]!)) i += 1;
     else break;
   }
-  return argv.slice(i);
+  return line.slice(i);
 }
 
 /** The plugin set of a Claude launch line: its `--settings` and `--plugin-dir` flags, in order. */

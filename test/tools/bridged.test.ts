@@ -368,7 +368,8 @@ describe("who is who", () => {
     expect(sends).toEqual([]);
     await s.call("herdr_agent", { action: "prompt", target: "ska/t7", engine: "core", text: "plain words" });
     await s.call("herdr_agent", { action: "prompt", target: "t7", engine: "core", text: "/reload-plugins" });
-    expect(sends).toEqual(["ska/t7", "t7"]);
+    await s.call("herdr_agent", { action: "prompt", target: "ska/t7", engine: "core", text: "!rm -rf /tmp/x" });
+    expect(sends).toEqual(["ska/t7", "t7", "ska/t7"]);
     expect(execs.length).toBe(1);
   });
 

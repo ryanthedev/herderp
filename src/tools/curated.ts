@@ -37,7 +37,8 @@ import type { AgentKind, AgentReadSource } from "../herdr/types.js";
 import type { CoreClient } from "../core/client.js";
 import type { SessionLookup } from "../core/sessions.js";
 import type { Engine } from "../bridge/route.js";
-import { agentRoute, coreAgentTool, corePaneTool, coreTabTool, coreWorkspaceTool, layoutRoute, type CoreHandler, type Route } from "./bridged.js";
+import { homeEngine } from "../bridge/route.js";
+import { agentRoute, markHerdrAgents, coreAgentTool, corePaneTool, coreTabTool, coreWorkspaceTool, layoutRoute, type CoreHandler, type Route } from "./bridged.js";
 import type { AdoptDeps } from "../bridge/adopt.js";
 
 /** `--until` on both `agent wait` and `agent prompt`. Verbatim from herdr
@@ -139,6 +140,38 @@ const ENGINE_DOC =
  * registration serves the local server and every registered remote alike.
  * With `bridge`, the agent/pane/tab/workspace tools also drive herdr-core.
  */
+/** Does this call make a new agent, pane, tab or workspace? */
+export function createsSomething(tool: string, args: { action?: unknown; destination?: unknown }): boolean {
+  switch (tool) {
+    case "herdr_agent":
+      return args.action === "start";
+    case "herdr_workspace":
+    case "herdr_tab":
+      return args.action === "create";
+    case "herdr_pane":
+      return args.action === "split" || (args.action === "move" && (args.destination === "new-tab" || args.destination === "new-workspace"));
+    default:
+      return false;
+  }
+}
+
+/**
+ * On 2026-11-11 a lead in the Herdr app started a new lead and a proxy in the
+ * herdr TUI server, and the user never saw them: the desktop app shows only
+ * herdr-core. Anything a caller outside herdr creates in herdr now says so.
+ */
+export function withCreationNotice(result: ToolResult, tool: string, args: { action?: unknown; destination?: unknown; host?: string }, env?: NodeJS.ProcessEnv): ToolResult {
+  if (typeof result === "string" || result.engine !== "herdr" || !createsSomething(tool, args)) return result;
+  const remote = args.host !== undefined && args.host !== "" && args.host !== "local";
+  if (!remote && homeEngine(env) === "herdr") return result;
+  return {
+    ...result,
+    notice:
+      `created in the herdr TUI server${remote ? ` on ${args.host}` : ""}, NOT in the Herdr desktop app - it will not appear in the app's window, ` +
+      "so the user won't see it there. If that's not what you meant, close it and create it again with engine:'core'.",
+  };
+}
+
 export function registerCuratedTools(server: McpServer, clients: ClientResolver, bridge?: BridgeDeps): void {
   const hostSchema = { host: z.string().optional() };
   const engineSchema = bridge ? { engine: ENGINE.optional() } : {};
@@ -154,6 +187,8 @@ export function registerCuratedTools(server: McpServer, clients: ClientResolver,
     route?: (args: ToolArgs<Shape & typeof hostSchema> & { engine?: Engine }, env?: NodeJS.ProcessEnv) => Route;
     /** The non-herdr routes (bridged.ts). Typed loosely here: each takes its own args shape. */
     core?: CoreHandler;
+    /** Post-processing on every answer, whichever engine gave it. */
+    decorate?: (result: ToolResult, args: ToolArgs<Shape & typeof hostSchema>) => ToolResult;
   }): void {
     const bridged = bridge !== undefined && definition.core !== undefined && definition.route !== undefined;
     registerTool(server, {
@@ -171,7 +206,9 @@ export function registerCuratedTools(server: McpServer, clients: ClientResolver,
                 return { client, run: (a: typeof args) => definition.handler(client, a) };
               }) as never);
         // With both engines in play, every object answer says which one gave it.
-        const stamped = bridged && typeof result !== "string" && route === "herdr" && !("engine" in result) ? { engine: "herdr", ...result } : result;
+        let stamped = bridged && typeof result !== "string" && route === "herdr" && !("engine" in result) ? { engine: "herdr", ...result } : result;
+        if (bridged && definition.decorate) stamped = definition.decorate(stamped, args);
+        if (bridged) stamped = withCreationNotice(stamped, definition.name, typed, bridge!.env);
         if (typeof stamped === "string" || args.host === undefined) return stamped;
         return { host: args.host, ...stamped };
       },
@@ -182,9 +219,9 @@ export function registerCuratedTools(server: McpServer, clients: ClientResolver,
     name: "herdr_agent",
     description:
       "Inspect and control the coding agents running in herdr panes. One tool, many actions - pick with `action`:\n" +
-      "- list: every agent (needs nothing else). get: one agent's status/cwd/ids (target).\n" +
+      "- list: every agent (needs nothing else). Your own row carries you:true, and the top-level `you` says which agent you are (or that you run outside both engines) - check it before acting on any row. get: one agent's status/cwd/ids (target).\n" +
       "- read: scrollback text (target; optional source/lines/format/ansi). source: recent (default), visible, recent-unwrapped, or detection - the view herdr's own detector sees, worth a look alongside action:'explain'.\n" +
-      "- prompt: submit TEXT to the agent as a prompt - this is how you ask an agent to do something (target, text; optional wait, until, timeoutMs). wait:true blocks until it settles.\n" +
+      "- prompt: submit TEXT to the agent as a prompt - this is how you ask an agent to do something (target, text; optional wait, until, timeoutMs). wait:true blocks until it settles. From a Herdr app terminal the agent sees it as <hc from=\"<your terminal>\">; the result's `from` says whether it was signed - when it is null, say who you are in the text.\n" +
       "- send_keys: send NAMED keys, e.g. keys:['esc'] to clear a composer (target, keys). Key names only - herdr rejects unknown ones with invalid_key, and there is no key for arbitrary text. Use prompt for text.\n" +
       "- focus: bring the agent's pane to the front (target).\n" +
       "- rename: give an agent a stable name, or clear:true to drop a custom one (target, then name or clear).\n" +
@@ -225,6 +262,7 @@ export function registerCuratedTools(server: McpServer, clients: ClientResolver,
       label: z.string().optional(),
     },
     route: (args, env) => agentRoute(args, env),
+    decorate: (result, args) => markHerdrAgents(result, args, bridge?.env),
     core: bridge ? coreAgentTool(bridge) : undefined,
     handler: async (client, args) => {
       const tool = "herdr_agent";

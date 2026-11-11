@@ -282,3 +282,78 @@ describe("herdr_agent fixes from review", () => {
     expect(body.panes[0]).toMatchObject({ terminal: "t7", agent: "", status: null });
   });
 });
+
+// 2026-11-11, booking on ska: a lead couldn't tell which agent it was, sent
+// unsigned notes, and started agents the Herdr app never showed.
+describe("who is who", () => {
+  it("list marks the caller's own core row and says who you are", async () => {
+    const { body } = await setup({ env: { HC_TERMINAL_ID: "t7" } }).call("herdr_agent", { action: "list" });
+    expect(body.you).toEqual({ engine: "core", target: "t7", where: "api / 1" });
+    expect(body.agents.filter((a: { you?: boolean }) => a.you).map((a: { target: string }) => a.target)).toEqual(["t7"]);
+  });
+
+  it("list marks the caller's herdr pane, also when herdr alone is listed", async () => {
+    const env = { HERDR_PANE_ID: "w1:p1", HERDR_WORKSPACE_ID: "w1", HC_TERMINAL_ID: "t7" };
+    const merged = (await setup({ env }).call("herdr_agent", { action: "list" })).body;
+    expect(merged.you).toMatchObject({ engine: "herdr", target: "w1:p1" });
+    expect(merged.agents.filter((a: { you?: boolean }) => a.you).map((a: { target: string }) => a.target)).toEqual(["w1:p1"]);
+    const herdrOnly = (await setup({ env }).call("herdr_agent", { action: "list", engine: "herdr" })).body;
+    expect(herdrOnly.you).toMatchObject({ engine: "herdr", target: "w1:p1", where: "w1" });
+    expect(herdrOnly.agents[0].you).toBe(true);
+  });
+
+  it("outside both engines, no row is you and the list says so", async () => {
+    const { body } = await setup({ env: {} }).call("herdr_agent", { action: "list" });
+    expect(body.you).toMatchObject({ engine: null, target: null });
+    expect(body.you.note).toContain("outside herdr and the Herdr app");
+    expect(body.agents.some((a: { you?: boolean }) => a.you)).toBe(false);
+  });
+
+  it("a remote list never marks a local caller", async () => {
+    const { body } = await setup({ env: { HC_TERMINAL_ID: "t7" } }).call("herdr_agent", { action: "list", host: "ska" });
+    expect(body.agents.some((a: { you?: boolean }) => a.you)).toBe(false);
+    expect(body.you.note).toContain("not on ska");
+  });
+
+  it("the caller's own core row is not marked when it is missing", async () => {
+    const { body } = await setup({ env: { HC_TERMINAL_ID: "t99" } }).call("herdr_agent", { action: "list" });
+    expect(body.you).toMatchObject({ engine: "core", target: "t99" });
+    expect(body.you.note).toContain("missing from this list");
+  });
+
+  it("get marks you on both engines", async () => {
+    expect((await setup({ env: { HC_TERMINAL_ID: "t7" } }).call("herdr_agent", { action: "get", target: "t7" })).body.agent.you).toBe(true);
+    expect((await setup({ env: { HC_TERMINAL_ID: "t1" } }).call("herdr_agent", { action: "get", target: "t7" })).body.agent.you).toBeUndefined();
+    const herdr = await setup({ env: { HERDR_PANE_ID: "w1:p1", HERDR_WORKSPACE_ID: "w1" } }).call("herdr_agent", { action: "get", target: "w1:p1" });
+    expect(herdr.body.agent.you).toBe(true);
+  });
+
+  it("a core prompt is signed with the caller's terminal, so the agent sees who sent it", async () => {
+    const sends: Array<Record<string, unknown> | undefined> = [];
+    const core = { terminalSend: async (_t: string, _x: string, o?: Record<string, unknown>) => (sends.push(o), { turn: 1, started: true, status: "idle", wait: null }) };
+    const signed = await setup({ env: { HC_TERMINAL_ID: "t3s" }, core: core as never }).call("herdr_agent", { action: "prompt", target: "t7", text: "go" });
+    expect(sends[0]).toMatchObject({ caller: "t3s" });
+    expect(signed.body.from).toBe("t3s");
+    const unsigned = await setup({ env: {}, core: core as never }).call("herdr_agent", { action: "prompt", target: "t7", text: "go" });
+    expect(sends[1]?.caller).toBeUndefined();
+    expect(unsigned.body.from).toBeNull();
+    expect(unsigned.body.fromNote).toContain("say who you are");
+  });
+
+  it("creating in herdr from outside herdr warns that the Herdr app won't show it", async () => {
+    const herdr = { workspaceCreate: async () => ({ workspace: { id: "w2" }, rootPane: { id: "w2:p1" } }), agentStart: async () => undefined };
+    const fromApp = await setup({ env: { HC_TERMINAL_ID: "t1" }, herdr: herdr as never }).call("herdr_agent", { action: "start", kind: "claude", name: "x", paneId: "w1:p1" });
+    expect(fromApp.body.engine).toBe("herdr");
+    expect(fromApp.body.notice).toContain("NOT in the Herdr desktop app");
+    const fromHerdr = await setup({ env: { HERDR_PANE_ID: "w1:p2", HERDR_WORKSPACE_ID: "w1" }, herdr: herdr as never }).call("herdr_agent", { action: "start", kind: "claude", name: "x", paneId: "w1:p1" });
+    expect(fromHerdr.body.notice).toBeUndefined();
+    const remote = await setup({ env: { HERDR_PANE_ID: "w1:p2", HERDR_WORKSPACE_ID: "w1" }, herdr: herdr as never }).call("herdr_agent", { action: "start", kind: "claude", name: "x", paneId: "w1:p1", host: "ska" });
+    expect(remote.body.notice).toContain("on ska");
+  });
+
+  it("creating in the Herdr app carries no notice", async () => {
+    const { body } = await setup({ env: { HC_TERMINAL_ID: "t1" } }).call("herdr_agent", { action: "start", kind: "claude" });
+    expect(body.engine).toBe("core");
+    expect(body.notice).toBeUndefined();
+  });
+});

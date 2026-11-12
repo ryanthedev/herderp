@@ -24,7 +24,7 @@ import { createTeam, fileExists, transcriptActivity } from "./team/core.js";
 import { registerTeamTools } from "./tools/team.js";
 
 export const SERVER_NAME = "derp";
-export const SERVER_VERSION = "0.15.3";
+export const SERVER_VERSION = "0.16.0";
 
 /** Builds a bare McpServer with no tools registered - reusable by the real entry point and by tests. */
 export function createServer(): McpServer {

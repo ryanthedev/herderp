@@ -28,6 +28,10 @@ export interface CoreTerminal {
   cwd: string;
   /** The foreground process: its pid and argv. Null once finished. */
   foreground: { pid: number; argv: string[]; cwd: string } | null;
+  /** The command line it was started with (`hc get`'s top-level argv); [] when unknown. */
+  argv: string[];
+  /** When it was started (ms since the epoch); null when the core didn't say. */
+  createdMs: number | null;
   labels: Record<string, string>;
   /** The terminal that started it (sub-agents), else null. */
   parent: string | null;

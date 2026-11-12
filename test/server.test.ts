@@ -70,6 +70,7 @@ describe("herderp MCP server (stdio)", () => {
         "herdr_worktree",
         "herdr_session_list",
         "herdr_host",
+        "herdr_team",
       ]) {
         expect(names).toContain(expected);
       }

@@ -11,25 +11,15 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { createHerdrClient } from "../herdr/client.js";
 import { defaultSocketPath } from "../herdr/events.js";
-import { createNecromancy, type Necromancy } from "../necromancy/core.js";
+import { createNecromancy } from "../necromancy/core.js";
+import { lastReply } from "../necromancy/reply.js";
 import { createCoreClient } from "../core/client.js";
 import { createSessionLookup } from "../core/sessions.js";
 import { runWatch, type RunWatchOptions } from "./run.js";
 import { coreSource, herdrSource } from "./sources.js";
 import { parseDuration } from "./watcher.js";
 
-/**
- * The agent's last reply of its own. sessionAnchors().lastState falls back to
- * the last turn of ANY role when there is no assistant prose (an agent that
- * stops before replying), and a user prompt or tool output must never be
- * quoted as the agent's reply - so the turn's role is checked.
- */
-export async function lastReply(necromancy: Necromancy, sessionId: string, cwd: string): Promise<string | undefined> {
-  const { lastState } = await necromancy.sessionAnchors({ sessionId, cwd });
-  if (!lastState) return undefined;
-  const { entries } = await necromancy.sessionRead({ sessionId, cwd, from: lastState.index, maxBytes: 1 });
-  return entries[0]?.role === "text" ? lastState.text : undefined;
-}
+export { lastReply };
 
 const USAGE = "usage: herderp watch <target>... [--stall 10m] [--once] [--json] [--verbose] [--poll 15s]";
 

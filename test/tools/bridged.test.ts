@@ -19,7 +19,7 @@ const PANE = `p${"c".repeat(32)}`;
 function terminal(over: Partial<CoreTerminal> = {}): CoreTerminal {
   return {
     address: "t7", name: "review", state: "live", app: "claude-code", status: "working", blockedKind: null, message: "m",
-    title: "", turn: 1, cwd: "/b", foreground: { pid: 7, argv: ["claude"], cwd: "/b" }, labels: {}, parent: null,
+    title: "", turn: 1, cwd: "/b", foreground: { pid: 7, argv: ["claude"], cwd: "/b" }, labels: {}, argv: [], createdMs: null, parent: null,
     spaceId: SPACE, tabId: TAB, where: "api / 1", machine: null, ...over,
   };
 }
@@ -108,6 +108,28 @@ describe("herdr_agent across engines", () => {
     expect(s.calls).toContain("core.send t7 go");
     const bad = await s.call("herdr_agent", { action: "prompt", target: "t7", text: "go", until: "done" });
     expect(bad.text).toStartWith("[unsupported_on_core]");
+  });
+
+  it("wait on core takes until idle/done/blocked and says whether the state it stopped in matched", async () => {
+    const waitAs = (status: string | null, ended = true) =>
+      setup({ core: { terminalWait: async () => ({ terminal: "t7", ended, reason: ended ? "status" : "timeout", status, turn: 2, exitCode: null }) } });
+    const hit = await waitAs("done").call("herdr_agent", { action: "wait", target: "t7", until: "done" });
+    expect(hit.body).toMatchObject({ engine: "core", matched: true, wait: { status: "done" } });
+    const miss = await waitAs("blocked").call("herdr_agent", { action: "wait", target: "t7", until: ["idle", "done"] });
+    expect(miss.body.matched).toBe(false);
+    expect(miss.body.hint).toContain("it stopped as blocked, not idle/done");
+    const checkIn = await waitAs("working", false).call("herdr_agent", { action: "wait", target: "t7", until: "done" });
+    expect(checkIn.body).toMatchObject({ matched: false });
+    expect(checkIn.body.hint).toContain("still working at the timeout");
+    const plain = await waitAs("idle").call("herdr_agent", { action: "wait", target: "t7" });
+    expect(plain.body.matched).toBeUndefined();
+  });
+
+  it("wait on core refuses the states hc cannot wait for, by name, before waiting", async () => {
+    const s = setup({ core: { terminalWait: async () => { throw new Error("must not be called"); } } });
+    const bad = await s.call("herdr_agent", { action: "wait", target: "t7", until: ["done", "working"] });
+    expect(bad.text).toStartWith("[unsupported_on_core]");
+    expect(bad.text).toContain(`not "working"`);
   });
 
   it("read on core reports a partial read honestly", async () => {

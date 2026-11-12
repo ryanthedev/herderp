@@ -48,7 +48,7 @@ import type { AdoptDeps } from "../bridge/adopt.js";
 const AGENT_WAIT_STATUS = z.enum(["idle", "working", "blocked", "done", "unknown"]);
 /** `--kind` on `agent start`, verbatim from herdr 0.7.5's help. Kept as a
  * closed enum because herdr rejects anything else at argument parsing. */
-const AGENT_KIND = z.enum([
+export const AGENT_KIND = z.enum([
   "pi", "claude", "codex", "gemini", "cursor", "devin", "agy", "cline",
   "omp", "mastracode", "opencode", "copilot", "kimi", "kiro", "droid",
   "amp", "grok", "hermes", "kilo", "qodercli", "maki",
@@ -124,7 +124,7 @@ const ENGINE = z.enum(["herdr", "core"]);
 /** herdr_agent's actions that exist only with herdr-core in play. */
 const BRIDGE_AGENT_DOC =
   "- adopt: move a Claude session from a herdr pane into the Herdr app (target = the herdr agent; optional workspaceId = a Herdr app space id to add it as a tab, else a new space named label or after the herdr workspace). It resumes the session there (claude --resume) and closes the old pane once the new one is up. Refuses unless the agent is idle or done; if the new one doesn't come up, or the old one changes meanwhile, the old pane stays and the new one is closed.\n" +
-  "On core (Herdr app): read takes lines (0 = screen only, fast; no source/format/ansi); prompt/wait wait until the agent stops working (no until); start opens a terminal (kind + optional argv/cwd/place/name, or workspaceId for a new tab there; no paneId/timeoutMs); rename and explain are herdr only.\n";
+  "On core (Herdr app): read takes lines (0 = screen only, fast; no source/format/ansi); prompt and wait both wait until the agent stops working; wait's until takes idle/done/blocked and the result says matched:true|false with the state it stopped in (prompt takes no until); start opens a terminal (kind + optional argv/cwd/place/name, or workspaceId for a new tab there; no paneId/timeoutMs); rename and explain are herdr only.\n";
 
 const ENGINE_DOC =
   "\nTwo engines: the herdr TUI server ('herdr') and herdr-core, which runs the Herdr desktop app's terminals ('core'). " +
